@@ -192,6 +192,32 @@ inline pid_t find_by_bruteforce(const char* nameNeedle, int maxPid, bool verbose
     return found;
 }
 
+// 按多个关键词扫描，打印所有命中者，返回第一个命中的 pid。
+// 用途：找游戏进程（普通 app 的路径可读），或找 SpringBoard（平台二进制，通常读不到路径）。
+inline pid_t find_by_needles(int maxPid, const char* const* needles, int n) {
+    printf("[find] 扫描 pid 1..%d，关键词 %d 个\n", maxPid, n);
+    pid_t found = 0;
+    int readable = 0;
+    for (pid_t p = 1; p <= maxPid; p++) {
+        mach_port_t t = MACH_PORT_NULL;
+        if (task_for_pid(mach_task_self(), p, &t) != KERN_SUCCESS) continue;
+        char path[1024];
+        bool ok = read_remote_path(t, path, sizeof(path));
+        mach_port_deallocate(mach_task_self(), t);
+        if (!ok) continue;
+        readable++;
+        for (int i = 0; i < n; i++) {
+            if (path[0] && strstr(path, needles[i])) {
+                printf("[find] 命中 pid=%-5d %s\n", p, path);
+                if (!found) found = p;
+                break;
+            }
+        }
+    }
+    printf("[find] 路径可读 %d 个进程，首个命中 pid=%d\n", readable, found);
+    return found;
+}
+
 // ---------------- 在目标进程里分配并写入 ----------------
 inline bool write_remote(Ctx& c, const void* src, size_t len, vm_address_t& out) {
     vm_address_t addr = 0;

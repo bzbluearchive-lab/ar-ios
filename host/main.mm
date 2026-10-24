@@ -140,14 +140,21 @@ static void ARInjectSpringBoard(void) {
 
     printf("[inject] pid=%d payload=%s\n", getpid(), pp.UTF8String);
 
-    // 枚举接口在沙盒里被拒（实测 sysctl=-1 / proc_listallpids=0），
-    // 所以直接走暴力定位：逐个 pid 试 task_for_pid，再读路径认身份
-    printf("[inject] 开始暴力定位 SpringBoard\n");
-    pid_t sb = rload::find_by_bruteforce("SpringBoard", 1024, true);
-    printf("[inject] SpringBoard pid=%d\n", sb);
-    if (!sb) { printf("[inject] 暴力定位失败，注入中止\n"); return; }
+    // 实测：无沙盒后 task_for_pid 能成功，但平台二进制（SpringBoard）的路径读不到，
+    // 普通 app 的路径读得到。所以优先注入游戏进程（普通 app）。
+    static const char* kNeedles[] = {
+        "Arena", "uamo", "ProximaBeta",     // Arena Breakout 各种可能的路径片段
+        "SpringBoard"                        // 兜底
+    };
+    printf("[inject] 开始扫描目标进程\n");
+    pid_t target = rload::find_by_needles(1024, kNeedles, 4);
+    printf("[inject] 目标 pid=%d\n", target);
+    if (!target) {
+        printf("[inject] 没找到目标。请先打开游戏再试一次。\n");
+        return;
+    }
 
-    bool ok = rload::inject_pid(sb, pp.UTF8String);
+    bool ok = rload::inject_pid(target, pp.UTF8String);
     printf("[inject] 结果=%s\n", ok ? "已注入" : "失败");
 }
 
@@ -185,7 +192,7 @@ static void ARInjectSpringBoard(void) {
 
     UIButton* inj = [UIButton buttonWithType:UIButtonTypeSystem];
     inj.frame = CGRectMake(pad, 190, (w - pad*3)/2, 48);
-    [inj setTitle:@"注入 SpringBoard" forState:UIControlStateNormal];
+    [inj setTitle:@"找游戏并注入" forState:UIControlStateNormal];
     inj.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     [inj addTarget:self action:@selector(onInject) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:inj];
