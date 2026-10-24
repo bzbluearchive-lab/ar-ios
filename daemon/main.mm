@@ -79,9 +79,25 @@ int main(int argc, char** argv) {
         int tick = 0;
         for (;;) {
             tick++;
+
+            // 1) 先按路径关键词找（游戏等普通 app）
             pid_t target = rload::find_by_needles(1024, needles, nNeedles);
+            const char* how = "path";
+
+            // 2) 再按 comm 找 SpringBoard。
+            //    daemon 是无沙盒进程，sysctl 能读到名字（旧版日志实测 pid=591 命中），
+            //    而 SpringBoard 是平台二进制，路径读不到，只能走这条路。
+            if (!target) {
+                pid_t sb = rload::find_pid_comm("SpringBoard");
+                if (sb) {
+                    L("按 comm 找到 SpringBoard pid=%d", sb);
+                    target = sb;
+                    how = "comm";
+                }
+            }
+
             if (target && target != lastInjected) {
-                L("发现目标 pid=%d，开始注入", target);
+                L("目标 pid=%d（%s），开始注入", target, how);
                 bool ok = rload::inject_pid(target, payload);
                 L("注入结果=%s pid=%d", ok ? "已投递" : "失败", target);
                 lastInjected = target;
