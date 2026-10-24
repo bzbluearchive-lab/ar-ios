@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Assemble diagnostic ipa variants for bisecting an "installs but crashes on launch" app.
+# Assemble ipa variants.
 #
-#   ARHost-M-min.ipa    minimal bundle: ONLY the main binary + Info.plist (vanilla sign)
-#   ARHost-B-full.ipa   full bundle: + ARDaemon + ARPayload.dylib (vanilla sign)
-#   ARHost-T-theos.ipa  theos's own staged bundle, untouched (if present)
+#   ARHost-J-ents.ipa   app signed WITH host/entitlements.plist (task port entitlements)
+#   ARHost-B-full.ipa   app signed vanilla (no entitlements) — known-good control
 #
-# Each variant gets a unique CFBundleIdentifier / display name so they can coexist
-# on the device and be tested one after another.
+# Both bundles are identical (binary + Info.plist + ARDaemon + ARPayload.dylib);
+# only the app's signature differs, so a launch difference isolates entitlements.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -16,76 +15,59 @@ command -v ldid >/dev/null || { echo "ERROR: ldid not found"; exit 1; }
 host_bin=$(find host/.theos/obj    -maxdepth 4 -name 'ARHost'  -type f 2>/dev/null | head -1 || true)
 dmn=$(find      daemon/.theos/obj  -maxdepth 4 -name 'ARDaemon' -type f 2>/dev/null | head -1 || true)
 pay=$(find      payload/.theos/obj -maxdepth 4 -name '*ARPayload*.dylib' -type f 2>/dev/null | head -1 || true)
-staged=$(find host/.theos/_ -maxdepth 4 -name 'ARHost.app' -type d 2>/dev/null | head -1 || true)
 
 echo "host   = ${host_bin:-<missing>}"
 echo "daemon = ${dmn:-<missing>}"
 echo "payload= ${pay:-<missing>}"
-echo "staged = ${staged:-<none>}"
 [ -n "$host_bin" ] || { echo "ERROR: ARHost binary not found"; exit 1; }
+[ -n "$pay" ] || { echo "ERROR: payload dylib not found"; exit 1; }
 
 rm -rf build
 mkdir -p build
 
-# mk_app <dir> <bundle-id> <display-name>   -> copies binary + plist, patches id/name
-mk_app() {
+mk_app() {  # mk_app <dir> <bundle-id> <display-name>
     local dir="$1" bid="$2" disp="$3"
-    rm -rf "$dir"
-    mkdir -p "$dir"
+    rm -rf "$dir"; mkdir -p "$dir"
     cp "$host_bin" "$dir/ARHost"
     cp host/Info.plist "$dir/Info.plist"
+    [ -n "${dmn:-}" ] && cp "$dmn" "$dir/ARDaemon" && chmod +x "$dir/ARDaemon"
+    cp "$pay" "$dir/ARPayload.dylib"
     chmod +x "$dir/ARHost"
-    $PB -c "Set :CFBundleIdentifier $bid"     "$dir/Info.plist"
-    $PB -c "Set :CFBundleDisplayName $disp"   "$dir/Info.plist"
-    $PB -c "Set :CFBundleName $disp"          "$dir/Info.plist"
+    $PB -c "Set :CFBundleIdentifier $bid"   "$dir/Info.plist"
+    $PB -c "Set :CFBundleDisplayName $disp" "$dir/Info.plist"
+    $PB -c "Set :CFBundleName $disp"        "$dir/Info.plist"
 }
 
-# pack <app-dir> <ipa-name>
-pack() {
-    local dir="$1" dest="$2"
+pack() {  # pack <app-dir> <ipa-name>
     rm -rf build/_ipa && mkdir -p build/_ipa/Payload
-    cp -a "$dir" build/_ipa/Payload/
-    ( cd build/_ipa && zip -qry "../$dest" Payload )
-    echo "packed $dest"
+    cp -a "$1" build/_ipa/Payload/
+    ( cd build/_ipa && zip -qry "../$2" Payload )
+    echo "packed $2"
 }
 
 echo
-echo "=== M: minimal (binary + Info.plist only, vanilla sign) ==="
-mk_app build/ARMin.app com.local.armin "AR M"
-ldid -S build/ARMin.app/ARHost
-pack build/ARMin.app ARHost-M-min.ipa
+echo "=== J: WITH entitlements (task port) ==="
+mk_app build/ARJ.app com.local.arj "AR J"
+ldid -Shost/entitlements.plist build/ARJ.app/ARHost
+echo "--- signed entitlements ---"
+ldid -e build/ARJ.app/ARHost | grep -E '<key>' | sed 's/^[[:space:]]*//' | sed 's#</\?key>##g' || true
+[ -n "${dmn:-}" ] && ldid -Sdaemon/entitlements.plist build/ARJ.app/ARDaemon
+ldid -S build/ARJ.app/ARPayload.dylib
+pack build/ARJ.app ARHost-J-ents.ipa
 
-if [ -n "$dmn" ] && [ -n "$pay" ]; then
-    echo
-    echo "=== B: full bundle (vanilla sign) ==="
-    mk_app build/ARFull.app com.local.arb "AR B"
-    cp "$dmn" build/ARFull.app/ARDaemon
-    cp "$pay" build/ARFull.app/ARPayload.dylib
-    chmod +x build/ARFull.app/ARDaemon
-    ldid -S build/ARFull.app/ARHost
-    ldid -S build/ARFull.app/ARDaemon
-    ldid -S build/ARFull.app/ARPayload.dylib
-    pack build/ARFull.app ARHost-B-full.ipa
-fi
-
-if [ -n "$staged" ]; then
-    echo
-    echo "=== T: theos staged bundle, untouched ==="
-    rm -rf build/ARTheos.app
-    cp -a "$staged" build/ARTheos.app
-    $PB -c "Set :CFBundleIdentifier com.local.art"  build/ARTheos.app/Info.plist
-    $PB -c "Set :CFBundleDisplayName AR T"          build/ARTheos.app/Info.plist
-    ldid -S build/ARTheos.app/ARHost || true
-    ls -la build/ARTheos.app
-    pack build/ARTheos.app ARHost-T-theos.ipa
-fi
+echo
+echo "=== B: control, vanilla sign ==="
+mk_app build/ARB.app com.local.arb "AR B"
+ldid -S build/ARB.app/ARHost
+[ -n "${dmn:-}" ] && ldid -S build/ARB.app/ARDaemon
+ldid -S build/ARB.app/ARPayload.dylib
+pack build/ARB.app ARHost-B-full.ipa
 
 echo
 echo "================ verify ================"
 for ipa in build/*.ipa; do
     echo "--- $ipa ---"
-    unzip -l "$ipa" | sed -n '4,20p'
+    unzip -l "$ipa" | sed -n '4,12p'
 done
-echo
 ls -lh build/*.ipa
 shasum -a 256 build/*.ipa

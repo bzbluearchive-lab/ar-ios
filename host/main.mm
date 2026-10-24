@@ -9,7 +9,10 @@
 
 #import <UIKit/UIKit.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include "DaemonSpawn.h"
+#include "../src/Inject/RemoteLoad.h"
 
 // 启动探针：进程真的跑起来了才会留下文件。
 // 用来区分两种完全不同的失败：
@@ -70,6 +73,46 @@ static NSString* payloadPath(void) {
     return [[NSBundle mainBundle] pathForResource:@"ARPayload" ofType:@"dylib"];
 }
 
+// ---------------------------------------------------------------------------
+// 直接在本进程里注入 SpringBoard（不再需要 ARDaemon）
+//
+// 为什么这样更好：
+//   1. 沙盒 app 不允许 posix_spawn 自己 bundle 里的二进制，daemon 那条路在 B 版
+//      签名下一定失败；
+//   2. 注入只发生在启动那一刻，注入完成后浮窗住在 SpringBoard 里，与谁启动它无关，
+//      所以 daemon 的生命周期对我们没有价值。
+// RemoteLoad 里的 printf 会被重定向到界面上显示的那个日志文件。
+// ---------------------------------------------------------------------------
+static void ARInjectSpringBoard(void) {
+    NSString* pp = payloadPath();
+    if (!pp || ![[NSFileManager defaultManager] fileExistsAtPath:pp]) {
+        fprintf(stderr, "[inject] payload 缺失: %s\n", pp ? pp.UTF8String : "(null)");
+        return;
+    }
+
+    // stdout/stderr -> 日志文件，界面每帧读它
+    NSString* logPath = daemonLogPath();
+    if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+        [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+    }
+    int fd = open(logPath.UTF8String, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd >= 0) {
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        close(fd);
+    }
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
+    printf("[inject] pid=%d payload=%s\n", getpid(), pp.UTF8String);
+    pid_t sb = rload::find_pid("SpringBoard");
+    printf("[inject] SpringBoard pid=%d\n", sb);
+    if (!sb) { printf("[inject] 找不到 SpringBoard\n"); return; }
+
+    bool ok = rload::inject("SpringBoard", pp.UTF8String);
+    printf("[inject] 结果=%s\n", ok ? "已注入" : "失败");
+}
+
 // ==================== UI ====================
 @interface RootVC : UIViewController
 @property (nonatomic, strong) UILabel* status;
@@ -102,7 +145,14 @@ static NSString* payloadPath(void) {
     [stop addTarget:self action:@selector(onStop) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:stop];
 
-    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 200, w - pad*2, self.view.bounds.size.height - 220)];
+    UIButton* inj = [UIButton buttonWithType:UIButtonTypeSystem];
+    inj.frame = CGRectMake(pad, 190, w - pad*2, 48);
+    [inj setTitle:@"注入 SpringBoard" forState:UIControlStateNormal];
+    inj.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    [inj addTarget:self action:@selector(onInject) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:inj];
+
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 260, w - pad*2, self.view.bounds.size.height - 280)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     [self.view addSubview:self.logView];
@@ -162,6 +212,20 @@ static NSString* payloadPath(void) {
 - (void)onStop {
     [@"stop" writeToFile:stopFlagPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     self.status.text = @"已写入 stop 标志，daemon 将在 1s 内退出";
+}
+
+- (void)onInject {
+    self.status.text = @"正在注入 SpringBoard…";
+    // 放后台队列：task_for_pid + thread_create 会阻塞，不能占主线程
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ARInjectSpringBoard();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
+                                                     encoding:NSUTF8StringEncoding error:nil];
+            self.logView.text = log ?: @"(没有日志)";
+            self.status.text = @"注入流程已结束，看下面日志";
+        });
+    });
 }
 
 @end

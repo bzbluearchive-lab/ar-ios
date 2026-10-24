@@ -76,10 +76,9 @@ for mk in ["host/Makefile", "daemon/Makefile", "payload/Makefile"]:
 # 两个二进制要求不同：
 #   host 是带界面的 UIKit app —— 必须有容器，所以不能带 no-container，
 #   也不需要 task port / 调试器权限（那些只给 daemon）。
-REQUIRED_ENT = [
-    "platform-application",
-    "com.apple.private.security.no-sandbox",
-]
+# host 只需要注入用的 task port 权限；platform-application / no-container
+# 已由实测证明会让 app 启动即退，不再要求。
+REQUIRED_ENT = []
 DAEMON_ENT = [
     "com.apple.private.cs.debugger",
     "task_for_pid-allow",

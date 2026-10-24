@@ -3,17 +3,21 @@
 <plist version="1.0">
 <dict>
 	<!--
-	  带界面的 app 只保留“能跑起来 + 能加载自己的 helper”的最小集合。
+	  精简集：只保留注入 SpringBoard 真正需要的权限。
 
-	  刻意去掉了这两条（它们只该给 daemon 那个无界面工具）：
-	    com.apple.private.security.no-container  → UIKit 拿不到容器会启动瞬间被杀
-	    com.apple.private.cs.debugger / task port → app 自己不需要，且属于高风险项
+	  刻意不包含的两条（上一轮实测证明它们会让 app 启动即退）：
+	    com.apple.private.security.no-container    -> UIKit 拿不到容器，启动被杀
+	    platform-application                       -> 把 app 变成“平台二进制”，
+	                                                  launchd 的容器/校验路径不同，实测闪退
+
+	  也不再需要 no-sandbox：实测表明沙盒 app 里 task_for_pid 仍然能成功
+	  （task_for_pid 只看 entitlement，不看沙盒）。
 	-->
-	<key>platform-application</key><true/>
-	<key>com.apple.private.security.no-sandbox</key><true/>
+	<key>com.apple.private.cs.debugger</key><true/>
+	<key>task_for_pid-allow</key><true/>
+	<key>com.apple.system-task-ports</key><true/>
 	<key>com.apple.private.skip-library-validation</key><true/>
-	<key>get-task-allow</key><true/>
 	<key>run-unsigned-code</key><true/>
-	<key>dynamic-codesigning</key><true/>
+	<key>get-task-allow</key><true/>
 </dict>
 </plist>
