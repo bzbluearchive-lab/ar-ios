@@ -1,7 +1,8 @@
 name: build
 
-# 用 GitHub 的 macOS runner 编译，本地零安装。
-# 产物：ARHost-A-ents.ipa / ARHost-B-vanilla.ipa（TrollStore 装）+ ARHost-app.zip（TrollFools 装）
+# macOS runner 构建，本地零安装。
+# 产物：build/*.ipa —— M(minimal) / B(full) / T(theos staged)，各自独立 bundle id，
+#       用于二分定位「安装成功但启动即退」的原因。
 
 on:
   push:
@@ -18,16 +19,12 @@ jobs:
           set -e
           export THEOS=$HOME/theos
           export PATH="/opt/homebrew/bin:$PATH"
-          echo "=== environment ==="
           clang --version | head -1
           git --version
           brew install ldid || brew upgrade ldid || echo "ldid already present"
-          echo "=== clone theos ==="
           git clone --recursive --depth=1 https://github.com/theos/theos.git "$THEOS"
-          echo "=== clone iOS SDKs ==="
           rm -rf "$THEOS/sdks"
           git clone --depth=1 https://github.com/theos/sdks.git "$THEOS/sdks"
-          echo "=== result ==="
           ls -d "$THEOS/sdks"/iPhoneOS*.sdk
           which ldid clang make
 
@@ -44,24 +41,30 @@ jobs:
       - name: 校验产物
         run: |
           set -e
-          echo "--- bundle contents ---"
-          ls -la build/ARHost.app
-          test -f build/ARHost.app/Info.plist || { echo "FATAL: Info.plist missing in bundle"; exit 1; }
-          plutil -lint build/ARHost.app/Info.plist
-          echo "--- A ipa ---"
-          unzip -l build/ARHost-A-ents.ipa
-          echo "--- B ipa ---"
-          unzip -l build/ARHost-B-vanilla.ipa
-          echo "--- arch ---"
-          for f in ARHost ARDaemon ARPayload.dylib; do
-            printf '%-18s ' "$f"
-            otool -hv "build/ARHost.app/$f" | awk 'NR==4{print $3, $4, $5}'
+          echo "=== build dir ==="
+          ls -la build
+          for ipa in build/*.ipa; do
+            echo
+            echo "=== $ipa ==="
+            unzip -l "$ipa"
+            tmp=$(mktemp -d)
+            unzip -q "$ipa" -d "$tmp"
+            app=$(find "$tmp/Payload" -maxdepth 1 -name '*.app' -type d | head -1)
+            test -n "$app" || { echo "FATAL: no .app inside $ipa"; exit 1; }
+            test -f "$app/Info.plist" || { echo "FATAL: no Info.plist inside $ipa"; exit 1; }
+            plutil -lint "$app/Info.plist"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/Info.plist"
+            echo "--- arch ---"
+            otool -hv "$app/ARHost" | awk 'NR==4{print $2,$3,$4,$5}'
+            echo "--- files in bundle ---"
+            ls -la "$app"
+            rm -rf "$tmp"
           done
 
       - name: 上传
         uses: actions/upload-artifact@v4
         with:
           name: ARHost-release
-          path: |
-            build/*.ipa
+          path: build/*.ipa
           if-no-files-found: error
