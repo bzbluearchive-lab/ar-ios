@@ -78,7 +78,7 @@ build_variant() {
     pack "build/$tag.app" "$out"
 }
 
-build_variant K3 com.local.ark3 "AR K3" build/ents/K1.plist ARHost-K3.ipa
+build_variant K4 com.local.ark4 "AR K4" build/ents/K1.plist ARHost-K4.ipa
 
 
 echo

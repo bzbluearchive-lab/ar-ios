@@ -23,7 +23,14 @@
 #include <mach/thread_act.h>
 #include <mach/arm/thread_status.h>
 #include <sys/sysctl.h>
-#include <libproc.h>
+
+// iOS SDK 不提供 <libproc.h>，但这两个符号由 libSystem 导出，
+// 所以手写原型即可（jailbreak 工具普遍这么做）。
+extern "C" {
+int proc_listallpids(void* buffer, int buffersize);
+int proc_pidpath(int pid, void* buffer, uint32_t buffersize);
+}
+static const int kProcPidPathMax = 1024;   // 对应 macOS 的 PROC_PIDPATHINFO_MAXSIZE
 
 namespace rload {
 
@@ -70,7 +77,7 @@ inline pid_t find_pid_path(const char* needle) {
     int cnt = proc_listallpids(pids, cap * (int)sizeof(pid_t));
     pid_t found = 0;
     for (int i = 0; i < cnt; i++) {
-        char path[PROC_PIDPATHINFO_MAXSIZE];
+        char path[kProcPidPathMax];
         memset(path, 0, sizeof(path));
         if (proc_pidpath(pids[i], path, sizeof(path)) > 0 && strstr(path, needle)) {
             found = pids[i];
@@ -110,7 +117,7 @@ inline void dump_procs(int maxPrint) {
             int cnt = proc_listallpids(pids, cap * (int)sizeof(pid_t));
             printf("[diag] proc_listallpids count=%d\n", cnt);
             for (int i = 0; i < cnt && i < maxPrint; i++) {
-                char path[PROC_PIDPATHINFO_MAXSIZE];
+                char path[kProcPidPathMax];
                 memset(path, 0, sizeof(path));
                 int r = proc_pidpath(pids[i], path, sizeof(path));
                 printf("  proc pid=%d path_rc=%d path='%s'\n", pids[i], r, path);
