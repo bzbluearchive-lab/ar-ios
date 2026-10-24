@@ -16,8 +16,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
 
 namespace inspect {
+
+// 代码签名 blob 全部是**大端序**，直接按小端读会得到 0xc00cdefa 这类错值
+static inline uint32_t be32(const void* p) {
+    uint32_t v = 0;
+    memcpy(&v, p, 4);
+    return ntohl(v);
+}
 
 // ---------------- Mach-O 结构（只取需要的字段） ----------------
 struct mach_header_64_t {
@@ -52,16 +60,16 @@ inline void print_entitlements(const uint8_t* base, size_t size) {
 
     const uint8_t* sigbase = base + sig->dataoff;
     const superblob_t* sb = (const superblob_t*)sigbase;
-    if (sb->magic != kCSMagicEmbedded) { printf("[ent] 签名 magic=0x%x 不是嵌入签名\n", sb->magic); return; }
-    printf("[ent] 代码签名 blob: %u 个子 blob\n", sb->count);
+    if (be32(&sb->magic) != kCSMagicEmbedded) { printf("[ent] 签名 magic=0x%x 不是嵌入签名\n", be32(&sb->magic)); return; }
+    printf("[ent] 代码签名 blob: %u 个子 blob\n", be32(&sb->count));
 
     const blob_index_t* idx = (const blob_index_t*)(sigbase + sizeof(superblob_t));
-    for (uint32_t i = 0; i < sb->count; i++) {
-        if (idx[i].type != kCSSLOTEntitlements) continue;
-        const blob_t* b = (const blob_t*)(sigbase + idx[i].offset);
-        if (b->magic != kCSMagicEntitlement) { printf("[ent] entitlements blob magic 异常\n"); return; }
+    for (uint32_t i = 0; i < be32(&sb->count); i++) {
+        if (be32(&idx[i].type) != kCSSLOTEntitlements) continue;
+        const blob_t* b = (const blob_t*)(sigbase + be32(&idx[i].offset));
+        if (be32(&b->magic) != kCSMagicEntitlement) { printf("[ent] entitlements blob magic 异常\n"); return; }
         const char* xml = (const char*)b + sizeof(blob_t);
-        size_t xlen = b->length - sizeof(blob_t);
+        size_t xlen = (size_t)be32(&b->length) - sizeof(blob_t);
         printf("[ent] ==== entitlements ====\n");
         fwrite(xml, 1, xlen, stdout);
         printf("\n[ent] =======================\n");
@@ -82,7 +90,10 @@ inline void print_entitlements(const uint8_t* base, size_t size) {
         }
         return;
     }
-    printf("[ent] 签名里没有 entitlements 项\n");
+    printf("[ent] 签名里没有 entitlements 项，列出所有子 blob 类型：\n");
+    for (uint32_t i = 0; i < be32(&sb->count); i++) {
+        printf("  slot type=0x%08x offset=%u\n", be32(&idx[i].type), be32(&idx[i].offset));
+    }
 }
 
 // ---------------- 字符串扫描：判断它用的是什么机制 ----------------
