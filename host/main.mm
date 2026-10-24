@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include "DaemonSpawn.h"
 #include "../src/Inject/RemoteLoad.h"
+#include "../src/Inject/AppInspect.h"
 
 // 启动探针：进程真的跑起来了才会留下文件。
 // 用来区分两种完全不同的失败：
@@ -200,6 +201,13 @@ static void ARInjectSpringBoard(const char* kw) {
     [inj addTarget:self action:@selector(onInject) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:inj];
 
+    // 分析目标 app：读它的二进制，看它用了什么机制（内核读写 / 场景托管 / 注入）
+    UIButton* ana = [UIButton buttonWithType:UIButtonTypeSystem];
+    ana.frame = CGRectMake(pad, 300, w - pad*2, 44);
+    [ana setTitle:@"分析目标 app（读它的权限与机制）" forState:UIControlStateNormal];
+    [ana addTarget:self action:@selector(onAnalyze) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:ana];
+
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
     scan.frame = CGRectMake(pad*2 + (w - pad*3)/2, 190, (w - pad*3)/2, 48);
@@ -216,7 +224,7 @@ static void ARInjectSpringBoard(const char* kw) {
     self.keyword.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
     [self.view addSubview:self.keyword];
 
-    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 300, w - pad*2, self.view.bounds.size.height - 320)];
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 356, w - pad*2, self.view.bounds.size.height - 376)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     [self.view addSubview:self.logView];
@@ -282,6 +290,42 @@ static void ARInjectSpringBoard(const char* kw) {
     self.status.text = @"已写入 stop 标志，daemon 将在 1s 内退出";
 }
 
+// 分析目标 app：找到进程 -> 读它的可执行文件路径 -> 解析 entitlements + 扫机制关键词
+// 把 stdout/stderr 接到日志文件，界面上就能看到
+static void ARRedirectToLog(void) {
+    NSString* logPath = daemonLogPath();
+    if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+        [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+    }
+    int fd = open(logPath.UTF8String, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd); }
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+}
+
+static void ARAnalyzeTarget(const char* kw) {    if (!kw || !kw[0]) { printf("[analyze] 关键词为空\n"); return; }
+    printf("\n=== 分析目标：%s ===\n", kw);
+
+    pid_t pid = rload::find_pid_comm(kw);
+    if (pid) printf("[analyze] 按 comm 命中 pid=%d\n", pid);
+    if (!pid) pid = rload::find_pid_path(kw);
+    if (!pid) pid = rload::find_by_needles(1024, &kw, 1);
+    if (!pid) { printf("[analyze] 找不到进程，先把它打开再试\n"); return; }
+
+    mach_port_t t = MACH_PORT_NULL;
+    if (task_for_pid(mach_task_self(), pid, &t) != KERN_SUCCESS) {
+        printf("[analyze] task_for_pid 失败\n"); return;
+    }
+    char path[1024];
+    bool ok = rload::read_remote_path(t, path, sizeof(path));
+    mach_port_deallocate(mach_task_self(), t);
+    if (!ok) { printf("[analyze] 读不到它的可执行路径\n"); return; }
+    printf("[analyze] 可执行文件: %s\n", path);
+
+    inspect::analyze_file(path);
+    printf("=== 分析结束 ===\n");
+}
+
 // 只扫描：安全诊断，只做 task_for_pid 与只读的 dyld 信息读取，不写、不注入
 static void ARScanOnly(const char* kw) {
     NSString* logPath = daemonLogPath();
@@ -313,6 +357,21 @@ static void ARScanOnly(const char* kw) {
                                                      encoding:NSUTF8StringEncoding error:nil];
             self.logView.text = log ?: @"(没有日志)";
             self.status.text = @"扫描完成，未注入";
+        });
+    });
+}
+
+- (void)onAnalyze {
+    NSString* kw = self.keyword.text.length ? self.keyword.text : @"DeltaForce";
+    self.status.text = @"正在分析目标…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ARRedirectToLog();
+        ARAnalyzeTarget(kw.UTF8String);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
+                                                     encoding:NSUTF8StringEncoding error:nil];
+            self.logView.text = log ?: @"(没有日志)";
+            self.status.text = @"分析完成";
         });
     });
 }
