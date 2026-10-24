@@ -1,34 +1,37 @@
-// daemon/main.m —— 常驻进程
+// daemon/main.mm —— 常驻扫描器：等目标出现就注入
 //
-// 生命周期：由启动器 app 用 posix_spawn + SETSID 孵化。
-// app 被划掉后它继续活着（这是"浮窗不消失"的核心）。
-// 重启设备后才消失（符合实测：重启后需要手动再开）。
+// 为什么需要它：
+//   注入必须在目标进程存活时进行，而我们的 app 一进后台就挂起。
+//   这个 daemon 是无沙盒进程，可以一直跑，每 2 秒扫一次进程表，
+//   目标（游戏）一出现就注入；同一 pid 只注入一次。
 //
-// 当前版本只做注入链的验证，不做读内存与绘制：
-//   1. 找 SpringBoard
-//   2. task_for_pid
-//   3. 远程 dlopen payload（payload 里建浮窗）
-//   4. 每秒写心跳 + 检查 stop 标志文件
+// 参数：
+//   argv[1] 日志路径
+//   argv[2] payload dylib 路径
+//   argv[3..] 目标路径关键词（可多个）
 //
-// 退出：启动器往容器里写 ar_daemon.stop，本进程 1 秒内退出。
+// 退出：同目录出现 ar_daemon.stop 文件。
 
 #import <Foundation/Foundation.h>
 #include <signal.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
+#include <stdarg.h>
 #include <time.h>
 #include "../src/Inject/RemoteLoad.h"
 
 static FILE* g_log = NULL;
 
-static void logf_(const char* fmt, ...) {
+static void L(const char* fmt, ...) {
     if (!g_log) return;
     time_t t = time(NULL);
     struct tm tmv;
     localtime_r(&t, &tmv);
     fprintf(g_log, "[%02d:%02d:%02d] ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-    va_list ap; va_start(ap, fmt);
+    va_list ap;
+    va_start(ap, fmt);
     vfprintf(g_log, fmt, ap);
     va_end(ap);
     fputc('\n', g_log);
@@ -37,57 +40,61 @@ static void logf_(const char* fmt, ...) {
 
 int main(int argc, char** argv) {
     @autoreleasepool {
-        setsid();                       // 双保险，脱离 app 的进程组
+        setsid();
         signal(SIGPIPE, SIG_IGN);
 
-        const char* logPath    = (argc > 1) ? argv[1] : "/tmp/ar_daemon.log";
-        const char* payloadPath= (argc > 2) ? argv[2] : NULL;
+        const char* logPath = (argc > 1) ? argv[1] : "/var/mobile/Library/Caches/ar_daemon.log";
+        const char* payload = (argc > 2) ? argv[2] : NULL;
 
         g_log = fopen(logPath, "a");
-        logf_("daemon 启动 pid=%d ppid=%d", getpid(), getppid());
+        if (!g_log) return 1;
 
-        if (!payloadPath) {
-            logf_("缺少 payload 路径参数，退出");
-            return 1;
+        // stdout/stderr 指向同一日志，RemoteLoad 里的 printf 就不会丢
+        int fd = open(logPath, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd); }
+        setvbuf(stdout, NULL, _IONBF, 0);
+        setvbuf(stderr, NULL, _IONBF, 0);
+
+        L("=== daemon 启动 pid=%d ppid=%d ===", getpid(), getppid());
+        L("payload=%s", payload ? payload : "(none)");
+
+        static const char* needles[16];
+        int nNeedles = 0;
+        for (int i = 3; i < argc && nNeedles < 16; i++) needles[nNeedles++] = argv[i];
+        if (nNeedles == 0) {
+            needles[nNeedles++] = "DeltaForce";
+            needles[nNeedles++] = "Arena";
+            needles[nNeedles++] = "uamo";
         }
-        logf_("payload=%s", payloadPath);
+        for (int i = 0; i < nNeedles; i++) L("关键词[%d]=%s", i, needles[i]);
 
-        // ---- 注入链 ----
-        pid_t sb = rload::find_pid("SpringBoard");
-        logf_("SpringBoard pid=%d", sb);
-        if (!sb) { logf_("找不到 SpringBoard"); }
+        if (!payload) { L("缺 payload 路径，退出"); return 1; }
 
-        if (sb) {
-            mach_port_t t = MACH_PORT_NULL;
-            kern_return_t kr = task_for_pid(mach_task_self(), sb, &t);
-            logf_("task_for_pid(SpringBoard) -> %d %s", kr,
-                  kr == KERN_SUCCESS ? "OK" : "FAILED");
-            if (kr == KERN_SUCCESS) {
-                mach_port_deallocate(mach_task_self(), t);
-                bool ok = rload::inject("SpringBoard", payloadPath);
-                logf_("inject -> %s", ok ? "resumed" : "failed");
-            } else {
-                logf_("entitlement 不足：检查 com.apple.system-task-ports / cs.debugger");
-            }
-        }
-
-        // ---- 常驻循环 ----
         char stopPath[1024];
         snprintf(stopPath, sizeof(stopPath), "%s", logPath);
-        // stop 标志与日志同目录
-        char* slash = strrchr(stopPath, '/');
-        if (slash) snprintf(slash + 1, sizeof(stopPath) - (slash + 1 - stopPath), "ar_daemon.stop");
+        char* slash2 = strrchr(stopPath, '/');
+        if (slash2) snprintf(slash2 + 1, sizeof(stopPath) - (size_t)(slash2 + 1 - stopPath), "ar_daemon.stop");
 
+        pid_t lastInjected = -1;
         int tick = 0;
         for (;;) {
-            sleep(1);
-            logf_("tick %d pid=%d ppid=%d", ++tick, getpid(), getppid());
+            tick++;
+            pid_t target = rload::find_by_needles(1024, needles, nNeedles);
+            if (target && target != lastInjected) {
+                L("发现目标 pid=%d，开始注入", target);
+                bool ok = rload::inject_pid(target, payload);
+                L("注入结果=%s pid=%d", ok ? "已投递" : "失败", target);
+                lastInjected = target;
+            } else if (!target) {
+                L("tick %d：目标不在运行", tick);
+            }
 
             if (access(stopPath, F_OK) == 0) {
-                logf_("检测到 stop 标志，退出");
+                L("检测到 stop 标志，退出");
                 unlink(stopPath);
                 break;
             }
+            sleep(2);
         }
 
         if (g_log) fclose(g_log);

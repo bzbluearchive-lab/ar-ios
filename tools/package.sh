@@ -85,7 +85,7 @@ build_variant() {
 }
 
 # P2b = 无沙盒 + 拿 task port 的权限（这两组各自都验证过不崩）
-build_variant G1 com.local.arg1 "AR G1" build/ents/P2b.plist ARHost-G1.ipa
+build_variant G2 com.local.arg2 "AR G2" build/ents/P2b.plist ARHost-G2.ipa
 
 
 echo

@@ -117,7 +117,7 @@ static NSString* payloadPath(void) {
 //      所以 daemon 的生命周期对我们没有价值。
 // RemoteLoad 里的 printf 会被重定向到界面上显示的那个日志文件。
 // ---------------------------------------------------------------------------
-static void ARInjectSpringBoard(void) {
+static void ARInjectSpringBoard(const char* kw) {
     NSString* pp = payloadPath();
     if (!pp || ![[NSFileManager defaultManager] fileExistsAtPath:pp]) {
         fprintf(stderr, "[inject] payload 缺失: %s\n", pp ? pp.UTF8String : "(null)");
@@ -142,12 +142,14 @@ static void ARInjectSpringBoard(void) {
 
     // 实测：无沙盒后 task_for_pid 能成功，但平台二进制（SpringBoard）的路径读不到，
     // 普通 app 的路径读得到。所以优先注入游戏进程（普通 app）。
-    static const char* kNeedles[] = {
-        "Arena", "uamo", "ProximaBeta",     // Arena Breakout 各种可能的路径片段
-        "SpringBoard"                        // 兜底
-    };
-    printf("[inject] 开始扫描目标进程\n");
-    pid_t target = rload::find_by_needles(1024, kNeedles, 4);
+    // 关键词由界面输入框决定；再带两个常见兜底
+    static const char* kFallback[] = { "Arena", "uamo", "ProximaBeta", "SpringBoard" };
+    const char* needles[8];
+    int n = 0;
+    if (kw && kw[0]) needles[n++] = kw;
+    for (int i = 0; i < 4; i++) needles[n++] = kFallback[i];
+    printf("[inject] 开始扫描目标进程（关键词 %d 个，首个=%s）\n", n, needles[0]);
+    pid_t target = rload::find_by_needles(1024, needles, n);
     printf("[inject] 目标 pid=%d\n", target);
     if (!target) {
         printf("[inject] 没找到目标。请先打开游戏再试一次。\n");
@@ -162,6 +164,7 @@ static void ARInjectSpringBoard(void) {
 @interface RootVC : UIViewController
 @property (nonatomic, strong) UILabel* status;
 @property (nonatomic, strong) UITextView* logView;
+@property (nonatomic, strong) UITextField* keyword;
 @end
 
 @implementation RootVC
@@ -204,7 +207,16 @@ static void ARInjectSpringBoard(void) {
     [scan addTarget:self action:@selector(onScan) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:scan];
 
-    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 260, w - pad*2, self.view.bounds.size.height - 280)];
+    // 目标关键词输入框：填游戏在 /var/containers/Bundle/Application/.../<这里>.app 里的名字
+    self.keyword = [[UITextField alloc] initWithFrame:CGRectMake(pad, 250, w - pad*2, 40)];
+    self.keyword.borderStyle = UITextBorderStyleRoundedRect;
+    self.keyword.placeholder = @"游戏关键词，例如 DeltaForce 或 Arena";
+    self.keyword.text = @"DeltaForce";
+    self.keyword.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    self.keyword.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
+    [self.view addSubview:self.keyword];
+
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 300, w - pad*2, self.view.bounds.size.height - 320)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     [self.view addSubview:self.logView];
@@ -243,11 +255,15 @@ static void ARInjectSpringBoard(void) {
         return;
     }
 
-    // 参数：argv[1]=日志路径 argv[2]=payload 路径
+    // 参数：argv[1]=日志路径 argv[2]=payload 路径 argv[3..]=目标关键词
+    NSString* kw = self.keyword.text.length ? self.keyword.text : @"DeltaForce";
     char* argv[] = {
         (char*)dp.UTF8String,
         (char*)daemonLogPath().UTF8String,
         (char*)pp.UTF8String,
+        (char*)kw.UTF8String,
+        (char*)"Arena",
+        (char*)"uamo",
         NULL
     };
     int err = 0;
@@ -267,7 +283,7 @@ static void ARInjectSpringBoard(void) {
 }
 
 // 只扫描：安全诊断，只做 task_for_pid 与只读的 dyld 信息读取，不写、不注入
-static void ARScanOnly(void) {
+static void ARScanOnly(const char* kw) {
     NSString* logPath = daemonLogPath();
     if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
         [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
@@ -278,15 +294,20 @@ static void ARScanOnly(void) {
     setvbuf(stderr, NULL, _IONBF, 0);
 
     printf("\n=== 只扫描模式：只读，不写入任何目标进程 ===\n");
-    pid_t sb = rload::find_by_bruteforce("SpringBoard", 1024, true);
-    printf("[scan] SpringBoard=%d\n", sb);
+    static const char* fb[] = { "Arena", "uamo", "ProximaBeta", "SpringBoard" };
+    const char* needles[8];
+    int n = 0;
+    if (kw && kw[0]) needles[n++] = kw;
+    for (int i = 0; i < 4; i++) needles[n++] = fb[i];
+    pid_t hit = rload::find_by_needles(1024, needles, n);
+    printf("[scan] 首个命中 pid=%d\n", hit);
     printf("=== 扫描结束，未做任何注入 ===\n");
 }
 
 - (void)onScan {
     self.status.text = @"正在扫描（只读，不注入）…";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        ARScanOnly();
+        ARScanOnly(self.keyword.text.UTF8String);
         dispatch_async(dispatch_get_main_queue(), ^{
             NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
                                                      encoding:NSUTF8StringEncoding error:nil];
@@ -300,7 +321,7 @@ static void ARScanOnly(void) {
     self.status.text = @"正在注入 SpringBoard…";
     // 放后台队列：task_for_pid + thread_create 会阻塞，不能占主线程
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        ARInjectSpringBoard();
+        ARInjectSpringBoard(self.keyword.text.UTF8String);
         dispatch_async(dispatch_get_main_queue(), ^{
             NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
                                                      encoding:NSUTF8StringEncoding error:nil];
