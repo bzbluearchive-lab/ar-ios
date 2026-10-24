@@ -78,8 +78,8 @@ build_variant() {
     pack "build/$tag.app" "$out"
 }
 
-build_variant K1 com.local.ark1 "AR K1" build/ents/K1.plist ARHost-K1.ipa
-build_variant K2 com.local.ark2 "AR K2" build/ents/K2.plist ARHost-K2.ipa
+build_variant K3 com.local.ark3 "AR K3" build/ents/K1.plist ARHost-K3.ipa
+
 
 echo
 echo "================ artifacts ================"

@@ -105,11 +105,16 @@ static void ARInjectSpringBoard(void) {
     setvbuf(stderr, NULL, _IONBF, 0);
 
     printf("[inject] pid=%d payload=%s\n", getpid(), pp.UTF8String);
+
+    // 先把能枚举到的进程打出来：沙盒 app 可能看不到别人的名字，
+    // 这段日志决定了走哪条定位路线
+    rload::dump_procs(60);
+
     pid_t sb = rload::find_pid("SpringBoard");
     printf("[inject] SpringBoard pid=%d\n", sb);
-    if (!sb) { printf("[inject] 找不到 SpringBoard\n"); return; }
+    if (!sb) { printf("[inject] 找不到 SpringBoard，注入中止\n"); return; }
 
-    bool ok = rload::inject("SpringBoard", pp.UTF8String);
+    bool ok = rload::inject_pid(sb, pp.UTF8String);
     printf("[inject] 结果=%s\n", ok ? "已注入" : "失败");
 }
 
