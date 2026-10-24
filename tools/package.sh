@@ -42,6 +42,11 @@ ent() {
 }
 
 ent build/ents/K1.plist task_for_pid-allow com.apple.system-task-ports get-task-allow
+# P 系列：验证 platform-application 是否能解锁受限权限
+ent build/ents/P1.plist platform-application
+ent build/ents/P2.plist platform-application com.apple.private.security.no-sandbox
+ent build/ents/P3.plist platform-application com.apple.private.cs.debugger
+ent build/ents/P4.plist platform-application task_for_pid-allow com.apple.system-task-ports get-task-allow
 ent build/ents/K2.plist task_for_pid-allow com.apple.system-task-ports get-task-allow \
                         com.apple.private.skip-library-validation run-unsigned-code
 
@@ -78,7 +83,10 @@ build_variant() {
     pack "build/$tag.app" "$out"
 }
 
-build_variant K6 com.local.ark6 "AR K6" build/ents/K1.plist ARHost-K6.ipa
+build_variant P1 com.local.arp1 "AR P1" build/ents/P1.plist ARHost-P1.ipa
+build_variant P2 com.local.arp2 "AR P2" build/ents/P2.plist ARHost-P2.ipa
+build_variant P3 com.local.arp3 "AR P3" build/ents/P3.plist ARHost-P3.ipa
+build_variant P4 com.local.arp4 "AR P4" build/ents/P4.plist ARHost-P4.ipa
 
 
 echo
