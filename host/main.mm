@@ -57,12 +57,46 @@ static NSString* containerPath(void) {
     return d.count ? d[0] : NSTemporaryDirectory();
 }
 
+// ---------------------------------------------------------------------------
+// 日志路径解析：
+//   无沙盒（platform-application / no-sandbox）的 app 常常没有容器，
+//   Documents 不存在，写日志会静默失败。所以按顺序试多个位置，
+//   选第一个真的能写的。
+// ---------------------------------------------------------------------------
+static BOOL can_write(NSString* path) {
+    if (!path) return NO;
+    NSString* dir = [path stringByDeletingLastPathComponent];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:dir]) return NO;
+    int fd = open(path.UTF8String, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd < 0) return NO;
+    close(fd);
+    return YES;
+}
+
+static NSString* resolveLogPath(void) {
+    static NSString* cached = nil;
+    if (cached) return cached;
+
+    NSMutableArray* cands = [NSMutableArray array];
+    NSArray* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (docs.count) [cands addObject:[docs[0] stringByAppendingPathComponent:@"ar_daemon.log"]];
+    [cands addObject:@"/var/mobile/Library/Caches/ar_daemon.log"];   // 无沙盒时可写
+    [cands addObject:@"/tmp/ar_daemon.log"];                         // /private/var/tmp
+    [cands addObject:[NSTemporaryDirectory() stringByAppendingPathComponent:@"ar_daemon.log"]];
+
+    for (NSString* p in cands) {
+        if (can_write(p)) { cached = p; return p; }
+    }
+    cached = cands.lastObject;
+    return cached;
+}
+
 static NSString* stopFlagPath(void) {
     return [containerPath() stringByAppendingPathComponent:@"ar_daemon.stop"];
 }
 
 static NSString* daemonLogPath(void) {
-    return [containerPath() stringByAppendingPathComponent:@"ar_daemon.log"];
+    return resolveLogPath();
 }
 
 static NSString* daemonPath(void) {
@@ -188,8 +222,8 @@ static void ARInjectSpringBoard(void) {
         if (r.location != NSNotFound) alive = @"运行中";
     }
     self.status.text = [NSString stringWithFormat:
-        @"daemon: %@\n日志: Documents/ar_daemon.log\npayload: %@",
-        alive, payloadPath() ? @"已打包" : @"缺失"];
+        @"daemon: %@\n日志: %@\npayload: %@",
+        alive, daemonLogPath(), payloadPath() ? @"已打包" : @"缺失"];
 }
 
 - (void)onStart {
