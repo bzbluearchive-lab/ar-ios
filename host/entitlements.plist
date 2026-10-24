@@ -3,21 +3,23 @@
 <plist version="1.0">
 <dict>
 	<!--
-	  精简集：只保留注入 SpringBoard 真正需要的权限。
+	  实测结论（2026-10-25，设备端逐个验证）：
 
-	  刻意不包含的两条（上一轮实测证明它们会让 app 启动即退）：
-	    com.apple.private.security.no-container    -> UIKit 拿不到容器，启动被杀
-	    platform-application                       -> 把 app 变成“平台二进制”，
-	                                                  launchd 的容器/校验路径不同，实测闪退
+	    可用：
+	      get-task-allow
+	      task_for_pid-allow
+	      com.apple.system-task-ports
 
-	  也不再需要 no-sandbox：实测表明沙盒 app 里 task_for_pid 仍然能成功
-	  （task_for_pid 只看 entitlement，不看沙盒）。
+	    会导致 app 启动即退，永久排除：
+	      com.apple.private.cs.debugger
+	      com.apple.private.security.no-sandbox
+	      com.apple.private.security.no-container
+	      platform-application（更早期实测）
+
+	  当前集合 = 注入 SpringBoard 的最小可行集。
 	-->
-	<key>com.apple.private.cs.debugger</key><true/>
 	<key>task_for_pid-allow</key><true/>
 	<key>com.apple.system-task-ports</key><true/>
-	<key>com.apple.private.skip-library-validation</key><true/>
-	<key>run-unsigned-code</key><true/>
 	<key>get-task-allow</key><true/>
 </dict>
 </plist>

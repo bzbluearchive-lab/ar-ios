@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Entitlement bisect: one ipa per entitlement set, unique bundle id each, so the
-# device can hold them all at once and we learn which entitlement kills launch.
+# Build the two candidate "real" variants now that the entitlement bisect is done.
 #
-#   E1 get-task-allow
-#   E2 cs.debugger + get-task-allow
-#   E3 task_for_pid-allow + get-task-allow
-#   E4 system-task-ports + get-task-allow
-#   E5 no-sandbox + get-task-allow
+# Bisect result (measured on device):
+#   get-task-allow            OK
+#   task_for_pid-allow        OK
+#   system-task-ports         OK
+#   com.apple.private.cs.debugger   CRASHES ON LAUNCH  -> never use
+#   com.apple.private.security.no-sandbox  CRASHES ON LAUNCH -> never use
 #
-# Every variant bundles the same binaries (app + ARDaemon + ARPayload.dylib) and has
-# the "注入 SpringBoard" button, so the first variant that launches can be used to
-# test the injection path immediately.
+#   ARHost-K1.ipa  task_for_pid-allow + system-task-ports + get-task-allow
+#   ARHost-K2.ipa  K1 + skip-library-validation + run-unsigned-code
+#                  (K2 only differs if dlopen of our ldid-signed payload is rejected
+#                   by library validation; the log will say so)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,7 +30,7 @@ echo "payload = ${pay:-<missing>}"
 
 rm -rf build; mkdir -p build/ents
 
-ent() {  # ent <file> <key...>
+ent() {
     local f="$1"; shift
     {
         echo '<?xml version="1.0" encoding="UTF-8"?>'
@@ -40,13 +41,11 @@ ent() {  # ent <file> <key...>
     } > "$f"
 }
 
-ent build/ents/E1.plist get-task-allow
-ent build/ents/E2.plist com.apple.private.cs.debugger get-task-allow
-ent build/ents/E3.plist task_for_pid-allow get-task-allow
-ent build/ents/E4.plist com.apple.system-task-ports get-task-allow
-ent build/ents/E5.plist com.apple.private.security.no-sandbox get-task-allow
+ent build/ents/K1.plist task_for_pid-allow com.apple.system-task-ports get-task-allow
+ent build/ents/K2.plist task_for_pid-allow com.apple.system-task-ports get-task-allow \
+                        com.apple.private.skip-library-validation run-unsigned-code
 
-mk_app() {  # mk_app <dir> <bundle-id> <display-name>
+mk_app() {
     local dir="$1" bid="$2" disp="$3"
     rm -rf "$dir"; mkdir -p "$dir"
     cp "$host_bin" "$dir/ARHost"
@@ -59,15 +58,15 @@ mk_app() {  # mk_app <dir> <bundle-id> <display-name>
     $PB -c "Set :CFBundleName $disp"        "$dir/Info.plist"
 }
 
-pack() {  # pack <app-dir> <ipa-name>
+pack() {
     rm -rf build/_ipa && mkdir -p build/_ipa/Payload
     cp -a "$1" build/_ipa/Payload/
     ( cd build/_ipa && zip -qry "../$2" Payload )
     echo "packed $2"
 }
 
-build_variant() {  # build_variant <tag> <bundle-id> <display> <plist>
-    local tag="$1" bid="$2" disp="$3" pl="$4"
+build_variant() {
+    local tag="$1" bid="$2" disp="$3" pl="$4" out="$5"
     echo
     echo "=== $tag ($disp) ==="
     mk_app "build/$tag.app" "$bid" "$disp"
@@ -76,15 +75,13 @@ build_variant() {  # build_variant <tag> <bundle-id> <display> <plist>
     ldid -S "build/$tag.app/ARPayload.dylib"
     echo "--- entitlements ---"
     ldid -e "build/$tag.app/ARHost" | grep -E '<key>' | sed 's/^[[:space:]]*//' | sed 's#</\?key>##g' || true
-    pack "build/$tag.app" "ARHost-$tag-${disp// /_}.ipa"
+    pack "build/$tag.app" "$out"
 }
 
-build_variant E1 com.local.are1 "AR E1" build/ents/E1.plist
-build_variant E2 com.local.are2 "AR E2" build/ents/E2.plist
-build_variant E3 com.local.are3 "AR E3" build/ents/E3.plist
-build_variant E4 com.local.are4 "AR E4" build/ents/E4.plist
-build_variant E5 com.local.are5 "AR E5" build/ents/E5.plist
+build_variant K1 com.local.ark1 "AR K1" build/ents/K1.plist ARHost-K1.ipa
+build_variant K2 com.local.ark2 "AR K2" build/ents/K2.plist ARHost-K2.ipa
 
 echo
 echo "================ artifacts ================"
 ls -lh build/*.ipa
+shasum -a 256 build/*.ipa
