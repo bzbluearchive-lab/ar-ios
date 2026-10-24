@@ -3,5 +3,10 @@ build/
 *.o
 *.dylib
 *.ipa
+out/
 .DS_Store
 Thumbs.db
+
+# never commit credentials
+.ar_gh_token
+gh_token.txt

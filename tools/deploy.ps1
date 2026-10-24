@@ -2,15 +2,22 @@
 #
 # ASCII only; Windows PowerShell 5.1 reads .ps1 as ANSI and non-ASCII can break parsing.
 #
-# Notes:
-#   - private repos here have no macOS minutes left, so the repo is flipped to public
-#     for the duration of the build (public repos get free runners) and restored after.
-#   - the repo also contains someone else's build-esp workflow, so runs are matched by
+# TOKEN HANDLING (learned the hard way):
+#   The token is NEVER stored in this repo. It is read from, in order:
+#     1. -Token parameter
+#     2. $env:AR_GH_TOKEN
+#     3. %USERPROFILE%\.ar_gh_token   (a file outside the project, one line, no newline needed)
+#   Committing a token to a public repo makes GitHub secret-scanning revoke it instantly.
+#
+# Repo notes:
+#   - private repos on this account have no macOS minutes left, so the repo is flipped
+#     public for the build (public repos get free runners) and restored afterwards.
+#   - the repo also carries someone else's build-esp workflow, so runs are matched by
 #     workflow name "build" AND our commit sha.
 
 param(
     [string]$Message = "update",
-    [string]$Token = "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",
+    [string]$Token,
     [string]$RepoName = "ar-ios",
     [switch]$NoBuild
 )
@@ -18,6 +25,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $api = 'https://api.github.com'
+
+if (-not $Token) { $Token = $env:AR_GH_TOKEN }
+if (-not $Token) {
+    $tf = Join-Path $env:USERPROFILE '.ar_gh_token'
+    if (Test-Path $tf) { $Token = (Get-Content $tf -Raw).Trim() }
+}
+if (-not $Token) { throw "no token: pass -Token, set AR_GH_TOKEN, or put it in %USERPROFILE%\.ar_gh_token" }
+
 $hdr = @{
     Authorization          = "token $Token"
     'User-Agent'           = 'ar-deploy'
@@ -66,10 +81,7 @@ $run = $null
 Start-Sleep -Seconds 15
 for ($i = 1; $i -le 40; $i++) {
     $runs = Invoke-RestMethod -Uri "$base/actions/runs?per_page=8" -Headers $hdr -Method Get
-    $run = $runs.workflow_runs | Where-Object { $_.name -eq 'build' -and $_.event -eq 'workflow_dispatch' -and $_.head_sha -eq $nc.sha } | Select-Object -First 1
-    if (-not $run) {
-        $run = $runs.workflow_runs | Where-Object { $_.name -eq 'build' -and $_.head_sha -eq $nc.sha } | Select-Object -First 1
-    }
+    $run = $runs.workflow_runs | Where-Object { $_.name -eq 'build' -and $_.head_sha -eq $nc.sha } | Select-Object -First 1
     if ($run) {
         "$($run.status)/$($run.conclusion)"
         if ($run.status -eq 'completed') { break }
@@ -91,12 +103,14 @@ if ($run -and $run.conclusion -eq 'success') {
         "  $($_.Name)  $([math]::Round($_.Length/1KB,1)) KB"
     }
     "copied to Desktop"
-} else {
+} elseif ($run) {
     $j = Invoke-RestMethod -Uri "$base/actions/runs/$($run.id)/jobs" -Headers $hdr -Method Get
     foreach ($s in $j.jobs[0].steps) { "  {0,-24} {1}/{2}" -f $s.name, $s.status, $s.conclusion }
     $lf = Join-Path $env:TEMP 'deploy.log'
     Invoke-WebRequest -Uri "$base/actions/jobs/$($j.jobs[0].id)/logs" -Headers $hdr -OutFile $lf -UseBasicParsing
     Get-Content $lf -Encoding UTF8 | Select-String -Pattern 'error:|ERROR|No such|undeclared|expected|##\[error\]' | Select-Object -Last 15 | ForEach-Object { $_.Line -replace '^\S+Z\s*', '' }
+} else {
+    "no run found for this commit"
 }
 
 # ---------- 5. restore private ----------
