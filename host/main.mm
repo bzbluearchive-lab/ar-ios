@@ -106,13 +106,12 @@ static void ARInjectSpringBoard(void) {
 
     printf("[inject] pid=%d payload=%s\n", getpid(), pp.UTF8String);
 
-    // 先把能枚举到的进程打出来：沙盒 app 可能看不到别人的名字，
-    // 这段日志决定了走哪条定位路线
-    rload::dump_procs(60);
-
-    pid_t sb = rload::find_pid("SpringBoard");
+    // 枚举接口在沙盒里被拒（实测 sysctl=-1 / proc_listallpids=0），
+    // 所以直接走暴力定位：逐个 pid 试 task_for_pid，再读路径认身份
+    printf("[inject] 开始暴力定位 SpringBoard\n");
+    pid_t sb = rload::find_by_bruteforce("SpringBoard", 1024, true);
     printf("[inject] SpringBoard pid=%d\n", sb);
-    if (!sb) { printf("[inject] 找不到 SpringBoard，注入中止\n"); return; }
+    if (!sb) { printf("[inject] 暴力定位失败，注入中止\n"); return; }
 
     bool ok = rload::inject_pid(sb, pp.UTF8String);
     printf("[inject] 结果=%s\n", ok ? "已注入" : "失败");

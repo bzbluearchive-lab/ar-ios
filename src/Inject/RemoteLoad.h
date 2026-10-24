@@ -127,6 +127,71 @@ inline void dump_procs(int maxPrint) {
     }
 }
 
+// ---------------- 跨进程读（用 vm_read_overwrite，对远程 task 有效） ----------------
+inline bool read_remote_mem(mach_port_t task, uint64_t addr, void* out, size_t n) {
+    if (!addr || !out || !n) return false;
+    vm_size_t got = 0;
+    kern_return_t kr = vm_read_overwrite(task, (vm_address_t)addr, (vm_size_t)n,
+                                         (vm_address_t)out, &got);
+    return kr == KERN_SUCCESS && got == (vm_size_t)n;
+}
+
+// 读目标进程主可执行文件的路径。
+// 路径来自 dyld_all_image_infos -> infoArray[0].imageFilePath。
+// 这是"不依赖进程枚举"识别进程的唯一可靠办法。
+inline bool read_remote_path(mach_port_t task, char* out, size_t cap) {
+    if (!out || cap < 2) return false;
+    out[0] = 0;
+
+    task_dyld_info_data_t di;
+    mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
+    if (task_info(task, TASK_DYLD_INFO, (task_info_t)&di, &cnt) != KERN_SUCCESS) return false;
+
+    uint64_t base = di.all_image_info_addr;
+    if (!base) return false;
+
+    // struct dyld_all_image_infos: +0 version(u32) +4 infoArrayCount(u32) +8 infoArray(ptr)
+    uint32_t imgCount = 0;
+    if (!read_remote_mem(task, base + 4, &imgCount, 4)) return false;
+    uint64_t arr = 0;
+    if (!read_remote_mem(task, base + 8, &arr, 8)) return false;
+    if (!imgCount || !arr) return false;
+
+    // struct dyld_image_info: +0 imageLoadAddress +8 imageFilePath +16 imageFileModDate
+    uint64_t pathPtr = 0;
+    if (!read_remote_mem(task, arr + 8, &pathPtr, 8)) return false;
+    if (!pathPtr) return false;
+
+    memset(out, 0, cap);
+    return read_remote_mem(task, pathPtr, out, cap - 1);
+}
+
+// ---------------- 暴力定位：不依赖任何进程枚举 API ----------------
+// 沙盒 app 的 sysctl / libproc 都被拒（实测 count=-1 / cap=0），
+// 所以逐个 pid 试 task_for_pid，成功者再读它的可执行文件路径来认身份。
+// 返回命中的 pid；未命中返回 0。verbose 时把每个成功的 pid 打出来。
+inline pid_t find_by_bruteforce(const char* nameNeedle, int maxPid, bool verbose) {
+    printf("[brute] 扫描 pid 1..%d 找 %s\n", maxPid, nameNeedle);
+    int hits = 0;
+    pid_t found = 0;
+    for (pid_t p = 1; p <= maxPid; p++) {
+        mach_port_t t = MACH_PORT_NULL;
+        kern_return_t kr = task_for_pid(mach_task_self(), p, &t);
+        if (kr != KERN_SUCCESS) continue;
+        hits++;
+        char path[1024];
+        bool ok = read_remote_path(t, path, sizeof(path));
+        if (verbose || (ok && strstr(path, nameNeedle))) {
+            printf("[brute] pid=%-5d path=%s\n", p, ok ? path : "(unknown)");
+        }
+        if (ok && strstr(path, nameNeedle) && !found) found = p;
+        mach_port_deallocate(mach_task_self(), t);
+        if (found) break;
+    }
+    printf("[brute] task_for_pid 成功 %d 个, 命中=%d\n", hits, found);
+    return found;
+}
+
 // ---------------- 在目标进程里分配并写入 ----------------
 inline bool write_remote(Ctx& c, const void* src, size_t len, vm_address_t& out) {
     vm_address_t addr = 0;
@@ -193,7 +258,11 @@ inline bool inject_pid(pid_t pid, const char* dylibPath) {
 
 inline bool inject(const char* procName, const char* dylibPath) {
     pid_t pid = find_pid(procName);
-    if (!pid) return false;
+    if (!pid) {
+        printf("[rload] 枚举找不到，改用暴力扫描\n");
+        pid = find_by_bruteforce(procName, 1024, true);
+    }
+    if (!pid) { printf("[rload] 暴力扫描也没命中\n"); return false; }
     return inject_pid(pid, dylibPath);
 }
 
