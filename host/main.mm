@@ -150,11 +150,18 @@ static void ARInjectSpringBoard(void) {
     [self.view addSubview:stop];
 
     UIButton* inj = [UIButton buttonWithType:UIButtonTypeSystem];
-    inj.frame = CGRectMake(pad, 190, w - pad*2, 48);
+    inj.frame = CGRectMake(pad, 190, (w - pad*3)/2, 48);
     [inj setTitle:@"注入 SpringBoard" forState:UIControlStateNormal];
-    inj.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    inj.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     [inj addTarget:self action:@selector(onInject) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:inj];
+
+    // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
+    UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
+    scan.frame = CGRectMake(pad*2 + (w - pad*3)/2, 190, (w - pad*3)/2, 48);
+    [scan setTitle:@"只扫描（不注入）" forState:UIControlStateNormal];
+    [scan addTarget:self action:@selector(onScan) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:scan];
 
     self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 260, w - pad*2, self.view.bounds.size.height - 280)];
     self.logView.editable = NO;
@@ -216,6 +223,36 @@ static void ARInjectSpringBoard(void) {
 - (void)onStop {
     [@"stop" writeToFile:stopFlagPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     self.status.text = @"已写入 stop 标志，daemon 将在 1s 内退出";
+}
+
+// 只扫描：安全诊断，只做 task_for_pid 与只读的 dyld 信息读取，不写、不注入
+static void ARScanOnly(void) {
+    NSString* logPath = daemonLogPath();
+    if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+        [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+    }
+    int fd = open(logPath.UTF8String, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd); }
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
+    printf("\n=== 只扫描模式：只读，不写入任何目标进程 ===\n");
+    pid_t sb = rload::find_by_bruteforce("SpringBoard", 1024, true);
+    printf("[scan] SpringBoard=%d\n", sb);
+    printf("=== 扫描结束，未做任何注入 ===\n");
+}
+
+- (void)onScan {
+    self.status.text = @"正在扫描（只读，不注入）…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ARScanOnly();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
+                                                     encoding:NSUTF8StringEncoding error:nil];
+            self.logView.text = log ?: @"(没有日志)";
+            self.status.text = @"扫描完成，未注入";
+        });
+    });
 }
 
 - (void)onInject {
