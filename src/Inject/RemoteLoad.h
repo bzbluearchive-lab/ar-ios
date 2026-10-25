@@ -218,6 +218,23 @@ inline pid_t find_by_needles(int maxPid, const char* const* needles, int n) {
     return found;
 }
 
+// 列出所有"路径可读"的进程（普通 app 都在这里，平台二进制读不到）
+inline int dump_readable(int maxPid, int maxPrint) {
+    int n = 0;
+    for (pid_t p = 1; p <= maxPid; p++) {
+        mach_port_t t = MACH_PORT_NULL;
+        if (task_for_pid(mach_task_self(), p, &t) != KERN_SUCCESS) continue;
+        char path[1024];
+        bool ok = read_remote_path(t, path, sizeof(path));
+        mach_port_deallocate(mach_task_self(), t);
+        if (!ok || !path[0]) continue;
+        n++;
+        if (n <= maxPrint) printf("[readable] pid=%-5d %s\n", p, path);
+    }
+    printf("[readable] 共 %d 个可读路径\n", n);
+    return n;
+}
+
 // ---------------- 在目标进程里分配并写入 ----------------
 inline bool write_remote(Ctx& c, const void* src, size_t len, vm_address_t& out) {
     vm_address_t addr = 0;

@@ -58,9 +58,15 @@ int main(int argc, char** argv) {
         L("=== daemon 启动 pid=%d ppid=%d ===", getpid(), getppid());
         L("payload=%s", payload ? payload : "(none)");
 
-        static const char* needles[16];
+        // 关键词支持 "Arena Breakout" 这种带空格的写法：拆成多个独立片段
+        static const char* needles[32];
         int nNeedles = 0;
-        for (int i = 3; i < argc && nNeedles < 16; i++) needles[nNeedles++] = argv[i];
+        for (int i = 3; i < argc && nNeedles < 30; i++) {
+            char* buf = strdup(argv[i]);
+            for (char* t = strtok(buf, " ,/"); t && nNeedles < 30; t = strtok(NULL, " ,/")) {
+                if (strlen(t) >= 2) needles[nNeedles++] = t;
+            }
+        }
         if (nNeedles == 0) {
             needles[nNeedles++] = "DeltaForce";
             needles[nNeedles++] = "Arena";
@@ -80,20 +86,13 @@ int main(int argc, char** argv) {
         for (;;) {
             tick++;
 
-            // 1) 先按路径关键词找（游戏等普通 app）
             pid_t target = rload::find_by_needles(1024, needles, nNeedles);
             const char* how = "path";
 
-            // 2) 再按 comm 找 SpringBoard。
-            //    daemon 是无沙盒进程，sysctl 能读到名字（旧版日志实测 pid=591 命中），
-            //    而 SpringBoard 是平台二进制，路径读不到，只能走这条路。
-            if (!target) {
-                pid_t sb = rload::find_pid_comm("SpringBoard");
-                if (sb) {
-                    L("按 comm 找到 SpringBoard pid=%d", sb);
-                    target = sb;
-                    how = "comm";
-                }
+            // 没命中时，每 5 次循环列一次所有可读路径，方便直接看出游戏叫什么
+            if (!target && (tick % 5 == 1)) {
+                L("未命中，列出当前可读路径：");
+                rload::dump_readable(1024, 20);
             }
 
             if (target && target != lastInjected) {
