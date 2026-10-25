@@ -1,15 +1,10 @@
-// AppInspect.h —— 在设备上直接分析另一个 app 的二进制
+// AppInspect.h —— 在设备上分析另一个 app 的二进制
 //
-// 前提：调用方无沙盒（fs 可读任意路径）
+// 针对大二进制（游戏本体常 300MB+）：
+//   - entitlements 只读文件头 + load commands + 签名段，不碰其余部分
+//   - 字符串扫描按 4MB 分块读，块间留 64 字节重叠，避免关键词跨块漏检
 //
-// 回答的问题：那个商业外挂是靠什么机制浮在系统窗口之上的？
-//   - 有 kfd / physpuppet / landa 之类字符串  → 内核读写
-//   - 有 FBScene / FrontBoard / CAContext     → 场景托管
-//   - 有 SpringBoard + Dobby/MSHookFunction   → 往 SpringBoard 注入
-//   - entitlements 里有 frontboard / system-task-ports / cs.debugger → 权限清单
-//
-// entitlements 是直接从二进制内嵌的代码签名 blob 里解析的（CS_SuperBlob ->
-// CSSLOT_ENTITLEMENTS），不依赖任何私有 API。
+// 代码签名 blob 是**大端序**（Apple 的规定），不是小端。
 
 #pragma once
 #include <stdint.h>
@@ -20,130 +15,168 @@
 
 namespace inspect {
 
-// 代码签名 blob 全部是**大端序**，直接按小端读会得到 0xc00cdefa 这类错值
 static inline uint32_t be32(const void* p) {
     uint32_t v = 0;
     memcpy(&v, p, 4);
     return ntohl(v);
 }
 
-// ---------------- Mach-O 结构（只取需要的字段） ----------------
-struct mach_header_64_t {
-    uint32_t magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved;
-};
-struct load_command_t { uint32_t cmd, cmdsize; };
-struct linkedit_data_command_t { uint32_t cmd, cmdsize; uint32_t dataoff, datasize; };
-struct blob_index_t { uint32_t type, offset; };
-struct superblob_t { uint32_t magic, length, count; };
-struct blob_t { uint32_t magic, length; };
-
-static const uint32_t kLCCodeSignature   = 0x1d;
+static const uint32_t kLCCodeSignature    = 0x1d;
 static const uint32_t kCSSLOTEntitlements = 5;
 static const uint32_t kCSMagicEmbedded    = 0xfade0cc0;
 static const uint32_t kCSMagicEntitlement = 0xfade7171;
 
-inline void print_entitlements(const uint8_t* base, size_t size) {
-    if (size < sizeof(mach_header_64_t)) { printf("[ent] 文件太小\n"); return; }
-    const mach_header_64_t* mh = (const mach_header_64_t*)base;
-    if (mh->magic != 0xfeedfacf) { printf("[ent] 不是 arm64 Mach-O\n"); return; }
+// ---------------- 1. entitlements：只读头部与签名段 ----------------
+inline void print_entitlements(FILE* f, long long fileSize) {
+    uint8_t hdr[32];
+    if (fseek(f, 0, SEEK_SET) != 0 || fread(hdr, 1, 32, f) != 32) { printf("[ent] 读头失败\n"); return; }
+    uint32_t magic;
+    memcpy(&magic, hdr, 4);
+    if (magic != 0xfeedfacf) { printf("[ent] 不是 arm64 Mach-O (magic=0x%x)\n", magic); return; }
+    uint32_t ncmds;
+    memcpy(&ncmds, hdr + 16, 4);
+    printf("[ent] Mach-O 头 OK, ncmds=%u, 文件 %.1f MB\n", ncmds, fileSize / 1048576.0);
 
-    const linkedit_data_command_t* sig = nullptr;
-    const uint8_t* p = base + sizeof(mach_header_64_t);
-    for (uint32_t i = 0; i < mh->ncmds; i++) {
-        const load_command_t* lc = (const load_command_t*)p;
-        if (lc->cmdsize == 0) break;
-        if (lc->cmd == kLCCodeSignature) { sig = (const linkedit_data_command_t*)lc; break; }
-        p += lc->cmdsize;
+    long long off = 32;
+    uint32_t sigOff = 0, sigSize = 0;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint8_t lc[16];
+        if (fseek(f, (long)off, SEEK_SET) != 0) break;
+        if (fread(lc, 1, 16, f) != 16) break;
+        uint32_t cmd, cmdsize;
+        memcpy(&cmd, lc, 4);
+        memcpy(&cmdsize, lc + 4, 4);
+        if (cmdsize < 8) break;
+        if (cmd == kLCCodeSignature) {
+            memcpy(&sigOff, lc + 8, 4);
+            memcpy(&sigSize, lc + 12, 4);
+            break;
+        }
+        off += cmdsize;
     }
-    if (!sig) { printf("[ent] 没有 LC_CODE_SIGNATURE（可能是未签名二进制）\n"); return; }
-    if ((size_t)sig->dataoff + sig->datasize > size) { printf("[ent] 签名段越界\n"); return; }
+    if (!sigOff || !sigSize) { printf("[ent] 没有 LC_CODE_SIGNATURE\n"); return; }
+    if (sigSize > 1024 * 1024) { printf("[ent] 签名段过大 %u\n", sigSize); return; }
 
-    const uint8_t* sigbase = base + sig->dataoff;
-    const superblob_t* sb = (const superblob_t*)sigbase;
-    if (be32(&sb->magic) != kCSMagicEmbedded) { printf("[ent] 签名 magic=0x%x 不是嵌入签名\n", be32(&sb->magic)); return; }
-    printf("[ent] 代码签名 blob: %u 个子 blob\n", be32(&sb->count));
+    uint8_t* sig = (uint8_t*)malloc(sigSize);
+    if (!sig) { printf("[ent] 内存不足\n"); return; }
+    if (fseek(f, (long)sigOff, SEEK_SET) != 0 || fread(sig, 1, sigSize, f) != sigSize) {
+        printf("[ent] 读签名段失败\n"); free(sig); return;
+    }
 
-    const blob_index_t* idx = (const blob_index_t*)(sigbase + sizeof(superblob_t));
-    for (uint32_t i = 0; i < be32(&sb->count); i++) {
-        if (be32(&idx[i].type) != kCSSLOTEntitlements) continue;
-        const blob_t* b = (const blob_t*)(sigbase + be32(&idx[i].offset));
-        if (be32(&b->magic) != kCSMagicEntitlement) { printf("[ent] entitlements blob magic 异常\n"); return; }
-        const char* xml = (const char*)b + sizeof(blob_t);
-        size_t xlen = (size_t)be32(&b->length) - sizeof(blob_t);
+    const uint32_t sbMagic = be32(sig);
+    const uint32_t sbCount = be32(sig + 8);
+    if (sbMagic != kCSMagicEmbedded) {
+        printf("[ent] 签名 magic=0x%08x 不是嵌入签名\n", sbMagic); free(sig); return;
+    }
+    printf("[ent] 嵌入签名，%u 个子 blob\n", sbCount);
+
+    bool printed = false;
+    for (uint32_t i = 0; i < sbCount && !printed; i++) {
+        const uint32_t type   = be32(sig + 12 + i * 8);
+        const uint32_t offset = be32(sig + 16 + i * 8);
+        printf("  slot[%u] type=0x%08x offset=%u\n", i, type, offset);
+        if (type != kCSSLOTEntitlements) continue;
+        if (offset + 8 > sigSize) continue;
+        const uint32_t bMagic  = be32(sig + offset);
+        const uint32_t bLength = be32(sig + offset + 4);
+        if (bMagic != kCSMagicEntitlement) { printf("[ent] 子 blob magic 异常\n"); continue; }
+        if (offset + bLength > sigSize) continue;
         printf("[ent] ==== entitlements ====\n");
-        fwrite(xml, 1, xlen, stdout);
+        fwrite(sig + offset + 8, 1, bLength - 8, stdout);
         printf("\n[ent] =======================\n");
 
-        // 顺手标出关键权限
         static const char* keys[] = {
-            "platform-application", "com.apple.private.cs.debugger",
-            "task_for_pid-allow", "com.apple.system-task-ports",
-            "com.apple.private.security.no-sandbox",
-            "com.apple.private.security.no-container",
-            "com.apple.frontboard", "com.apple.springboard",
-            "com.apple.backboard", "com.apple.QuartzCore",
-            "com.apple.private.amfi", "dynamic-codesigning", "run-unsigned-code",
+            "platform-application", "com.apple.private.cs.debugger", "task_for_pid-allow",
+            "com.apple.system-task-ports", "no-sandbox", "no-container",
+            "frontboard", "springboard", "backboard", "dynamic-codesigning", "run-unsigned-code",
+            "com.apple.private.amfi",
         };
         for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
-            if (memmem(xml, xlen, keys[k], strlen(keys[k])))
-                printf("[ent] ★ 命中权限: %s\n", keys[k]);
+            if (memmem(sig + offset, bLength, keys[k], strlen(keys[k])))
+                printf("[ent] * 命中权限: %s\n", keys[k]);
         }
-        return;
+        printed = true;
     }
-    printf("[ent] 签名里没有 entitlements 项，列出所有子 blob 类型：\n");
-    for (uint32_t i = 0; i < be32(&sb->count); i++) {
-        printf("  slot type=0x%08x offset=%u\n", be32(&idx[i].type), be32(&idx[i].offset));
-    }
+    if (!printed) printf("[ent] 没找到 entitlements 子 blob\n");
+    free(sig);
 }
 
-// ---------------- 字符串扫描：判断它用的是什么机制 ----------------
-inline void scan_mechanism_strings(const uint8_t* base, size_t size) {
+// ---------------- 2. 字符串扫描：分块 ----------------
+inline void scan_strings(FILE* f, long long fileSize) {
     static const char* probes[] = {
-        // 游戏身份标识（判断这个 app 到底是哪个游戏）
+        // 游戏身份
         "uamo", "ArenaBreakout", "Arena", "Breakout",
         "DeltaForce", "dfm", "tmgp", "proximabeta", "tencent",
+        // 引擎
+        "GWorld", "GNames", "FNamePool", "UWorld", "UnrealEngine", "il2cpp",
         // 内核读写
-        "kfd", "physpuppet", "landa", "smith", "kernrw", "libkernrw", "tfp0", "kread", "kwrite",
-        // 场景托管
-        "FBScene", "FrontBoard", "FBSOpen", "SBScene", "CAContext", "CARemoteLayer", "BackBoard",
-        // 注入
-        "SpringBoard", "Dobby", "MSHookFunction", "hook", "thread_create", "vm_write",
-        "task_for_pid", "ptrace", "mach_vm",
-        // 越狱生态
-        "ellekit", "Substrate", "libhooker", "libjailbreak", "jailbreak",
-        // 浮窗
-        "UIWindow", "windowLevel", "SBS", "overlay",
+        "kfd", "physpuppet", "landa", "kernrw", "tfp0",
+        // 注入 / 浮窗
+        "task_for_pid", "thread_create", "mach_vm", "ptrace",
+        "UIWindow", "windowLevel", "SBS", "overlay", "BackBoard", "SpringBoard",
+        "Dobby", "MSHookFunction", "ellekit", "Substrate",
     };
-    printf("[scan] 机制关键词命中：\n");
-    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
-        const char* k = probes[i];
-        size_t kl = strlen(k);
-        int hits = 0;
-        for (size_t off = 0; off + kl <= size; off++) {
-            if (base[off] == (uint8_t)k[0] && memcmp(base + off, k, kl) == 0) {
-                if (++hits >= 3) break;   // 每词最多数 3 次，够判断了
+    const int nProbes = (int)(sizeof(probes) / sizeof(probes[0]));
+    int hits[64];
+    for (int i = 0; i < 64; i++) hits[i] = 0;
+
+    const size_t CHUNK = 4 * 1024 * 1024;
+    const size_t OVERLAP = 64;
+    uint8_t* buf = (uint8_t*)malloc(CHUNK + OVERLAP);
+    if (!buf) { printf("[scan] 内存不足\n"); return; }
+    memset(buf, 0, CHUNK + OVERLAP);
+
+    long long done = 0;
+    size_t carry = 0;
+    while (done < fileSize) {
+        if (fseek(f, (long)done, SEEK_SET) != 0) break;
+        size_t want = CHUNK;
+        if ((long long)want > fileSize - done) want = (size_t)(fileSize - done);
+        size_t got = fread(buf + carry, 1, want, f);
+        if (got == 0) break;
+        size_t total = carry + got;
+
+        for (int i = 0; i < nProbes && i < 64; i++) {
+            const char* k = probes[i];
+            size_t kl = strlen(k);
+            if (kl == 0 || total < kl) continue;
+            const uint8_t* p = buf;
+            size_t remain = total;
+            while (remain >= kl) {
+                const uint8_t* found = (const uint8_t*)memmem(p, remain, k, kl);
+                if (!found) break;
+                if (hits[i] < 999) hits[i]++;
+                size_t consumed = (size_t)(found - p) + kl;
+                p += consumed;
+                remain -= consumed;
             }
         }
-        if (hits) printf("  %-24s x%d\n", k, hits);
+
+        carry = (total >= OVERLAP) ? OVERLAP : total;
+        memmove(buf, buf + total - carry, carry);
+
+        done += got;
+        printf("[scan] 进度 %.0f%%\n", 100.0 * done / (double)fileSize);
     }
+    free(buf);
+
+    printf("[scan] === 关键词命中 ===\n");
+    for (int i = 0; i < nProbes && i < 64; i++)
+        if (hits[i]) printf("  %-16s x%d\n", probes[i], hits[i]);
 }
 
-// ---------------- 读文件并分析 ----------------
+// ---------------- 3. 入口 ----------------
 inline bool analyze_file(const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) { printf("[inspect] 打不开 %s\n", path); return false; }
     fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 200 * 1024 * 1024) { fclose(f); printf("[inspect] 大小异常 %ld\n", sz); return false; }
-    uint8_t* buf = (uint8_t*)malloc((size_t)sz);
-    if (!buf) { fclose(f); return false; }
-    size_t got = fread(buf, 1, (size_t)sz, f);
+    long long sz = ftell(f);
+    if (sz <= 0) { fclose(f); printf("[inspect] 空文件\n"); return false; }
+    printf("[inspect] 目标 %.1f MB\n", sz / 1048576.0);
+
+    print_entitlements(f, sz);
+    scan_strings(f, sz);
     fclose(f);
-    printf("[inspect] 读入 %zu 字节: %s\n", got, path);
-    print_entitlements(buf, got);
-    scan_mechanism_strings(buf, got);
-    free(buf);
     return true;
 }
 
