@@ -146,9 +146,11 @@ static inline bool bundle_id_of_pid(pid_t pid, char* out, size_t cap) {
     free(buf);
 
     for (int i = 0; i < n; i++) {
-        // 优先取不含 line3rdp / 前缀干扰的规范 id
-        if (strstr(ids[i], ".com.") || strncmp(ids[i], "line3rdp", 8) == 0) continue;
-        if (out && cap) snprintf(out, cap, "%s", ids[i]);
+        // 真机上 bundle id 常带团队前缀，例如 WPPQKQGUG.com.proximabeta.mf.uamo
+        // 所以统一从 "com." 开始取后缀再比较
+        const char* c = strstr(ids[i], "com.");
+        if (!c) continue;
+        if (out && cap) snprintf(out, cap, "%s", c);
         return true;
     }
     if (n > 0) { if (out && cap) snprintf(out, cap, "%s", ids[0]); return true; }
@@ -156,12 +158,19 @@ static inline bool bundle_id_of_pid(pid_t pid, char* out, size_t cap) {
 }
 
 // 按 bundle id 找进程（比按路径匹配可靠：app 目录名可能变）
+static inline bool bid_equal(const char* a, const char* b) {
+    if (!a || !b) return false;
+    const char* ca = strstr(a, "com.");
+    const char* cb = strstr(b, "com.");
+    return strcmp(ca ? ca : a, cb ? cb : b) == 0;
+}
+
 static inline pid_t find_pid_by_bundle(const char* bid, int maxPid, char* pathOut, size_t cap) {
     if (!bid || !bid[0]) return 0;
     for (pid_t p = 1; p <= maxPid; p++) {
         char got[96];
         if (!bundle_id_of_pid(p, got, sizeof(got))) continue;
-        if (strcmp(got, bid) != 0) continue;
+        if (!bid_equal(got, bid)) continue;
         if (pathOut && cap) {
             mach_port_t t = MACH_PORT_NULL;
             if (task_for_pid(mach_task_self(), p, &t) == KERN_SUCCESS) {

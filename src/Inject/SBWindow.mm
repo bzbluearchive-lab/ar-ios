@@ -13,7 +13,24 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <os/log.h>
+#include <unistd.h>
 
+// 面包屑：证明 payload 真的被 dlopen 进来并执行了。
+// 目标进程是沙盒 app，只能写它自己的容器，所以写到 NSTemporaryDirectory()，
+// 之后由我们的（无沙盒）app 去各容器里搜这个文件。
+static void ARBreadcrumb(const char* tag) {
+    @autoreleasepool {
+        NSString* p = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                       [NSString stringWithFormat:@"ar_loaded_%d.txt", getpid()]];
+        NSString* line = [NSString stringWithFormat:@"%@ %s pid=%d\n",
+                          [NSDate date], tag, getpid()];
+        NSData* d = [line dataUsingEncoding:NSUTF8StringEncoding];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:p])
+            [[NSFileManager defaultManager] createFileAtPath:p contents:nil attributes:nil];
+        NSFileHandle* fh = [NSFileHandle fileHandleForWritingAtPath:p];
+        if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:d]; [fh closeFile]; } @catch (...) {} }
+    }
+}
 static UIWindow*          g_window    = nil;
 static UIWindowScene*     g_scene     = nil;
 static id                 g_obsAct    = nil;
@@ -188,6 +205,7 @@ static void watch_scenes(void) {
 
 __attribute__((constructor))
 static void sb_payload_init(void) {
+    ARBreadcrumb("constructor");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
         dump_scenes();

@@ -175,6 +175,7 @@ static void ARInjectSpringBoard(const char* kw) {
 
     bool ok = rload::inject_pid(target, pp.UTF8String);
     printf("[inject] 结果=%s\n", ok ? "已注入" : "失败");
+    ARDumpBreadcrumbs();
 }
 
 // ==================== UI ====================
@@ -304,6 +305,30 @@ static void ARInjectSpringBoard(const char* kw) {
 - (void)onStop {
     [@"stop" writeToFile:stopFlagPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     self.status.text = @"已写入 stop 标志，daemon 将在 1s 内退出";
+}
+
+// 去所有 app 数据容器里找 payload 的面包屑文件，证明注入是否真的加载成功
+static void ARDumpBreadcrumbs(void) {
+    printf("\n=== payload 面包屑 ===\n");
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* base = @"/var/mobile/Containers/Data/Application";
+    NSArray* dirs = [fm contentsOfDirectoryAtPath:base error:nil];
+    int found = 0;
+    for (NSString* d in dirs) {
+        NSString* tmp = [NSString stringWithFormat:@"%@/%@/tmp", base, d];
+        NSArray* files = [fm contentsOfDirectoryAtPath:tmp error:nil];
+        for (NSString* f in files) {
+            if (![f hasPrefix:@"ar_loaded_"]) continue;
+            NSString* full = [NSString stringWithFormat:@"%@/%@", tmp, f];
+            NSString* content = [NSString stringWithContentsOfFile:full
+                                                         encoding:NSUTF8StringEncoding error:nil];
+            printf("[breadcrumb] %s\n", full.UTF8String);
+            if (content) printf("    %s\n", content.UTF8String);
+            found++;
+        }
+    }
+    if (!found) printf("[breadcrumb] 一个都没有 —— payload 没有被加载（dlopen 很可能被 library validation 拒了）\n");
+    printf("=== 面包屑结束 ===\n");
 }
 
 // 分析目标 app：找到进程 -> 读它的可执行文件路径 -> 解析 entitlements + 扫机制关键词
