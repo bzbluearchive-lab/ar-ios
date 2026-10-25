@@ -99,6 +99,9 @@ inline void print_entitlements(const uint8_t* base, size_t size) {
 // ---------------- 字符串扫描：判断它用的是什么机制 ----------------
 inline void scan_mechanism_strings(const uint8_t* base, size_t size) {
     static const char* probes[] = {
+        // 游戏身份标识（判断这个 app 到底是哪个游戏）
+        "uamo", "ArenaBreakout", "Arena", "Breakout",
+        "DeltaForce", "dfm", "tmgp", "proximabeta", "tencent",
         // 内核读写
         "kfd", "physpuppet", "landa", "smith", "kernrw", "libkernrw", "tfp0", "kread", "kwrite",
         // 场景托管

@@ -91,6 +91,24 @@ static inline void print_bundle_ids(const char* execPath) {
 
     char ids[8][96];
     int n = extract_ids(buf, (size_t)sz, ids, 8);
+    // 二进制 plist 里字符串可能是 UTF-16（字符间夹 0x00），补一遍
+    if (n == 0) {
+        int m = 0;
+        for (size_t i = 0; i + 16 < (size_t)sz && m < 8; i++) {
+            if (buf[i] == 'c' && buf[i+1] == 0 && buf[i+2] == 'o' && buf[i+3] == 0 &&
+                buf[i+4] == 'm' && buf[i+5] == 0 && buf[i+6] == '.' && buf[i+7] == 0) {
+                char tmp[96]; int k = 0;
+                size_t j = i;
+                while (j + 1 < (size_t)sz && k < 95 && buf[j+1] == 0 && printable(buf[j])) {
+                    tmp[k++] = (char)buf[j]; j += 2;
+                }
+                tmp[k] = 0;
+                if (k >= 8) { snprintf(ids[m], 96, "%s", tmp); m++; }
+                i = j;
+            }
+        }
+        n = m;
+    }
     printf("    Info.plist: %s\n", plist);
     if (n == 0) printf("    (没找到 bundle id 候选)\n");
     for (int i = 0; i < n; i++) printf("    bundle候选: %s\n", ids[i]);
