@@ -145,13 +145,16 @@ static inline bool bundle_id_of_pid(pid_t pid, char* out, size_t cap) {
     if (n == 0) n = extract_ids_utf16(buf, (size_t)sz, ids, 8);
     free(buf);
 
-    for (int i = 0; i < n; i++) {
-        // 真机上 bundle id 常带团队前缀，例如 WPPQKQGUG.com.proximabeta.mf.uamo
-        // 所以统一从 "com." 开始取后缀再比较
-        const char* c = strstr(ids[i], "com.");
-        if (!c) continue;
-        if (out && cap) snprintf(out, cap, "%s", c);
-        return true;
+    // 把所有候选都收集起来（真机上第一个含 com. 的往往不是我们要的那个）
+    if (n > 0) {
+        const char* best = nullptr;
+        for (int i = 0; i < n; i++) {
+            const char* c = strstr(ids[i], "com.");
+            if (!c) continue;
+            if (!best) best = c;
+        }
+        if (best && out && cap) snprintf(out, cap, "%s", best);
+        return best != nullptr;
     }
     if (n > 0) { if (out && cap) snprintf(out, cap, "%s", ids[0]); return true; }
     return false;
@@ -165,12 +168,46 @@ static inline bool bid_equal(const char* a, const char* b) {
     return strcmp(ca ? ca : a, cb ? cb : b) == 0;
 }
 
+// 判断某 pid 是否属于指定 bundle id（会比对该 app 的所有候选 id）
+static inline bool pid_matches_bundle(pid_t pid, const char* bid) {
+    char path[1024];
+    mach_port_t t = MACH_PORT_NULL;
+    if (task_for_pid(mach_task_self(), pid, &t) != KERN_SUCCESS) return false;
+    bool okr = rload::read_remote_path(t, path, sizeof(path));
+    mach_port_deallocate(mach_task_self(), t);
+    if (!okr || !path[0]) return false;
+
+    char root[1024];
+    if (!app_root_from_exec(path, root, sizeof(root))) return false;
+    char plistPath[1200];
+    snprintf(plistPath, sizeof(plistPath), "%s/Info.plist", root);
+    FILE* f = fopen(plistPath, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 4 * 1024 * 1024) { fclose(f); return false; }
+    uint8_t* buf = (uint8_t*)malloc((size_t)sz);
+    if (!buf) { fclose(f); return false; }
+    fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+
+    char ids[12][96];
+    int n = extract_ids(buf, (size_t)sz, ids, 12);
+    if (n == 0) n = extract_ids_utf16(buf, (size_t)sz, ids, 12);
+    free(buf);
+
+    for (int i = 0; i < n; i++) {
+        if (bid_equal(ids[i], bid)) return true;
+    }
+    return false;
+}
 static inline pid_t find_pid_by_bundle(const char* bid, int maxPid, char* pathOut, size_t cap) {
     if (!bid || !bid[0]) return 0;
     for (pid_t p = 1; p <= maxPid; p++) {
         char got[96];
         if (!bundle_id_of_pid(p, got, sizeof(got))) continue;
-        if (!bid_equal(got, bid)) continue;
+        if (!pid_matches_bundle(p, bid)) continue;
         if (pathOut && cap) {
             mach_port_t t = MACH_PORT_NULL;
             if (task_for_pid(mach_task_self(), p, &t) == KERN_SUCCESS) {

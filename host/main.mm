@@ -149,8 +149,11 @@ static void ARInjectSpringBoard(const char* kw) {
 
     // 实测：无沙盒后 task_for_pid 能成功，但平台二进制（SpringBoard）的路径读不到，
     // 普通 app 的路径读得到。所以优先注入游戏进程（普通 app）。
-    // 第一优先：按 bundle id 精确定位（app 目录名可能变，bundle id 不会）
-    static const char* kTargetBundle = "com.proximabeta.mf.uamo";   // 暗区突围国际服 = UAGame
+    // 关键词框里填 com.xxx 就按 bundle id 定位；否则用默认目标（暗区国际服）
+    const char* kTargetBundle = (kw && strncmp(kw, "com.", 4) == 0)
+                              ? kw
+                              : "com.proximabeta.mf.uamo";
+    printf("[inject] 目标 bundle id = %s\n", kTargetBundle);
     char tpath[1024] = {0};
     pid_t byBundle = bundleinfo::find_pid_by_bundle(kTargetBundle, 1024, tpath, sizeof(tpath));
     if (byBundle) {
