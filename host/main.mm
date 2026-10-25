@@ -122,6 +122,8 @@ static NSString* payloadPath(void) {
 //      所以 daemon 的生命周期对我们没有价值。
 // RemoteLoad 里的 printf 会被重定向到界面上显示的那个日志文件。
 // ---------------------------------------------------------------------------
+static void ARDumpBreadcrumbs(void);   // 前向声明
+
 static void ARInjectSpringBoard(const char* kw) {
     NSString* pp = payloadPath();
     if (!pp || ![[NSFileManager defaultManager] fileExistsAtPath:pp]) {
