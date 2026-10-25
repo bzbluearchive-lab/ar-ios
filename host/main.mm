@@ -17,6 +17,7 @@
 #include "../src/Inject/BundleInfo.h"
 #include "../src/Kernel/KernelBackend.h"
 #include "../src/Kernel/BuildTable.h"
+#include "../src/Kernel/KernelCache.h"
 
 // 启动探针：进程真的跑起来了才会留下文件。
 // 用来区分两种完全不同的失败：
@@ -353,6 +354,7 @@ static void ARScanOnly(const char* kw) {
     printf("\n=== 内核侧状态 ===\n");
     buildtable::dump_status();
     kback::dump_status();
+    kcache::probe();
 
     printf("\n=== 各 app 的 bundle id ===\n");
     bundleinfo::dump_all_bundles(1024, 20);
