@@ -14,6 +14,7 @@
 #include "DaemonSpawn.h"
 #include "../src/Inject/RemoteLoad.h"
 #include "../src/Inject/AppInspect.h"
+#include "../src/Inject/BundleInfo.h"
 
 // 启动探针：进程真的跑起来了才会留下文件。
 // 用来区分两种完全不同的失败：
@@ -345,6 +346,10 @@ static void ARScanOnly(const char* kw) {
     for (int i = 0; i < 4; i++) needles[n++] = fb[i];
     pid_t hit = rload::find_by_needles(1024, needles, n);
     printf("[scan] 首个命中 pid=%d\n", hit);
+
+    // 把每个 app 的 bundle id 也读出来：进程名可能和游戏显示名完全无关
+    printf("\n=== 各 app 的 bundle id ===\n");
+    bundleinfo::dump_all_bundles(1024, 20);
     printf("=== 扫描结束，未做任何注入 ===\n");
 }
 
