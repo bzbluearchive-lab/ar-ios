@@ -114,6 +114,66 @@ static inline void print_bundle_ids(const char* execPath) {
     free(buf);
 }
 
+// 取某个进程所属 app 的 bundle id（读它的 Info.plist）
+static inline bool bundle_id_of_pid(pid_t pid, char* out, size_t cap) {
+    if (out && cap) out[0] = 0;
+    mach_port_t t = MACH_PORT_NULL;
+    if (task_for_pid(mach_task_self(), pid, &t) != KERN_SUCCESS) return false;
+    char path[1024];
+    bool ok = rload::read_remote_path(t, path, sizeof(path));
+    mach_port_deallocate(mach_task_self(), t);
+    if (!ok || !path[0]) return false;
+
+    char root[1024];
+    if (!app_root_from_exec(path, root, sizeof(root))) return false;
+    char plistPath[1200];
+    snprintf(plistPath, sizeof(plistPath), "%s/Info.plist", root);
+
+    FILE* f = fopen(plistPath, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 4 * 1024 * 1024) { fclose(f); return false; }
+    uint8_t* buf = (uint8_t*)malloc((size_t)sz);
+    if (!buf) { fclose(f); return false; }
+    fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+
+    char ids[8][96];
+    int n = extract_ids(buf, (size_t)sz, ids, 8);
+    if (n == 0) n = extract_ids_utf16(buf, (size_t)sz, ids, 8);
+    free(buf);
+
+    for (int i = 0; i < n; i++) {
+        // 优先取不含 line3rdp / 前缀干扰的规范 id
+        if (strstr(ids[i], ".com.") || strncmp(ids[i], "line3rdp", 8) == 0) continue;
+        if (out && cap) snprintf(out, cap, "%s", ids[i]);
+        return true;
+    }
+    if (n > 0) { if (out && cap) snprintf(out, cap, "%s", ids[0]); return true; }
+    return false;
+}
+
+// 按 bundle id 找进程（比按路径匹配可靠：app 目录名可能变）
+static inline pid_t find_pid_by_bundle(const char* bid, int maxPid, char* pathOut, size_t cap) {
+    if (!bid || !bid[0]) return 0;
+    for (pid_t p = 1; p <= maxPid; p++) {
+        char got[96];
+        if (!bundle_id_of_pid(p, got, sizeof(got))) continue;
+        if (strcmp(got, bid) != 0) continue;
+        if (pathOut && cap) {
+            mach_port_t t = MACH_PORT_NULL;
+            if (task_for_pid(mach_task_self(), p, &t) == KERN_SUCCESS) {
+                rload::read_remote_path(t, pathOut, cap);
+                mach_port_deallocate(mach_task_self(), t);
+            }
+        }
+        return p;
+    }
+    return 0;
+}
+
 // 列出所有路径可读的进程 + 它们各自的 bundle id
 static inline void dump_all_bundles(int maxPid, int maxPrint) {
     int shown = 0;

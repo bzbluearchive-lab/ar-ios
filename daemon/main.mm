@@ -21,6 +21,7 @@
 #include <stdarg.h>
 #include <time.h>
 #include "../src/Inject/RemoteLoad.h"
+#include "../src/Inject/BundleInfo.h"
 
 static FILE* g_log = NULL;
 
@@ -86,8 +87,13 @@ int main(int argc, char** argv) {
         for (;;) {
             tick++;
 
-            pid_t target = rload::find_by_needles(1024, needles, nNeedles);
-            const char* how = "path";
+            // 优先按 bundle id 精确定位
+            pid_t target = bundleinfo::find_pid_by_bundle("com.proximabeta.mf.uamo", 1024, nullptr, 0);
+            const char* how = "bundle";
+            if (!target) {
+                target = rload::find_by_needles(1024, needles, nNeedles);
+                how = "path";
+            }
 
             // 没命中时，每 5 次循环列一次所有可读路径，方便直接看出游戏叫什么
             if (!target && (tick % 5 == 1)) {

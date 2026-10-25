@@ -147,8 +147,20 @@ static void ARInjectSpringBoard(const char* kw) {
 
     // 实测：无沙盒后 task_for_pid 能成功，但平台二进制（SpringBoard）的路径读不到，
     // 普通 app 的路径读得到。所以优先注入游戏进程（普通 app）。
-    // 关键词由界面输入框决定；再带两个常见兜底
-    static const char* kFallback[] = { "Arena", "uamo", "ProximaBeta", "SpringBoard" };
+    // 第一优先：按 bundle id 精确定位（app 目录名可能变，bundle id 不会）
+    static const char* kTargetBundle = "com.proximabeta.mf.uamo";   // 暗区突围国际服 = UAGame
+    char tpath[1024] = {0};
+    pid_t byBundle = bundleinfo::find_pid_by_bundle(kTargetBundle, 1024, tpath, sizeof(tpath));
+    if (byBundle) {
+        printf("[inject] 按 bundle id 命中 pid=%d (%s)\n", byBundle, kTargetBundle);
+        printf("[inject] path=%s\n", tpath);
+        bool okb = rload::inject_pid(byBundle, pp.UTF8String);
+        printf("[inject] 结果=%s\n", okb ? "已注入" : "失败");
+        return;
+    }
+    printf("[inject] 按 bundle id 没找到目标，改用关键词匹配\n");
+
+    static const char* kFallback[] = { "UAGame", "uamo", "Arena", "ProximaBeta" };
     const char* needles[8];
     int n = 0;
     if (kw && kw[0]) needles[n++] = kw;

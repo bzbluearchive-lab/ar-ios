@@ -109,6 +109,8 @@ inline void scan_strings(FILE* f, long long fileSize) {
         "DeltaForce", "dfm", "tmgp", "proximabeta", "tencent",
         // 引擎
         "GWorld", "GNames", "FNamePool", "UWorld", "UnrealEngine", "il2cpp",
+        // 反作弊（ACE / anogs）
+        "anogs", "AnoSDK", "ACESDK", "libACE", "anti-cheat", "AntiCheat",
         // 内核读写
         "kfd", "physpuppet", "landa", "kernrw", "tfp0",
         // 注入 / 浮窗
