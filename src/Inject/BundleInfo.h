@@ -17,40 +17,56 @@
 
 namespace bundleinfo {
 
-static inline bool printable(uint8_t c) { return c >= 0x20 && c < 0x7f; }
+static inline bool idchar(uint8_t c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
+}
 
-// 从字节流里挑出像 bundle id 的字符串
+// 定位 "com." 后向两侧扩展到非 id 字符为止 —— XML 与二进制 plist 都适用
 static inline int extract_ids(const uint8_t* data, size_t n, char out[][96], int maxOut) {
     int found = 0;
-    size_t i = 0;
-    while (i < n && found < maxOut) {
-        if (!printable(data[i])) { i++; continue; }
+    for (size_t i = 0; i + 4 <= n && found < maxOut; i++) {
+        if (!(data[i] == 'c' && data[i+1] == 'o' && data[i+2] == 'm' && data[i+3] == '.')) continue;
+        // 向左扩展
         size_t start = i;
-        while (i < n && printable(data[i])) i++;
-        size_t len = i - start;
+        while (start > 0 && idchar(data[start - 1]) && i - start < 64) start--;
+        // 向右扩展
+        size_t end = i + 4;
+        while (end < n && idchar(data[end]) && end - start < 90) end++;
+        size_t len = end - start;
         if (len < 8 || len > 90) continue;
-        // 必须含 "com." 且不含空格
-        bool hasCom = false, hasSpace = false;
-        for (size_t k = 0; k < len; k++) {
-            uint8_t c = data[start + k];
-            if (c == ' ') { hasSpace = true; break; }
-            if (k + 4 <= len && memcmp(data + start + k, "com.", 4) == 0) hasCom = true;
-        }
-        if (hasSpace || !hasCom) continue;
-        // 只要有字母数字点和横线
-        bool clean = true;
-        for (size_t k = 0; k < len; k++) {
-            uint8_t c = data[start + k];
-            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_')) { clean = false; break; }
-        }
-        if (!clean) continue;
-        snprintf(out[found], 96, "%.*s", (int)len, (const char*)(data + start));
-        found++;
+
+        char tmp[96];
+        snprintf(tmp, sizeof(tmp), "%.*s", (int)len, (const char*)(data + start));
+        // 至少要有一个点在 com 之后
+        if (!strchr(tmp + 4, '.')) continue;
+
+        bool dup = false;
+        for (int k = 0; k < found; k++) if (strcmp(out[k], tmp) == 0) { dup = true; break; }
+        if (!dup) { snprintf(out[found], 96, "%s", tmp); found++; }
+        i = end;
     }
     return found;
 }
 
+// UTF-16（字符间夹 0x00）版本
+static inline int extract_ids_utf16(const uint8_t* data, size_t n, char out[][96], int maxOut) {
+    int found = 0;
+    for (size_t i = 0; i + 9 < n && found < maxOut; i++) {
+        if (!(data[i] == 'c' && data[i+1] == 0 && data[i+2] == 'o' && data[i+3] == 0 &&
+              data[i+4] == 'm' && data[i+5] == 0 && data[i+6] == '.' && data[i+7] == 0)) continue;
+        char tmp[96]; int k = 0;
+        size_t j = i;
+        while (j + 1 < n && k < 90 && data[j+1] == 0 && idchar(data[j])) { tmp[k++] = (char)data[j]; j += 2; }
+        tmp[k] = 0;
+        if (k < 8) continue;
+        bool dup = false;
+        for (int m = 0; m < found; m++) if (strcmp(out[m], tmp) == 0) { dup = true; break; }
+        if (!dup) { snprintf(out[found], 96, "%s", tmp); found++; }
+        i = j;
+    }
+    return found;
+}
 // 从可执行文件路径推导出 .app 根目录
 static inline bool app_root_from_exec(const char* execPath, char* out, size_t cap) {
     if (!execPath || !execPath[0]) return false;
@@ -91,24 +107,7 @@ static inline void print_bundle_ids(const char* execPath) {
 
     char ids[8][96];
     int n = extract_ids(buf, (size_t)sz, ids, 8);
-    // 二进制 plist 里字符串可能是 UTF-16（字符间夹 0x00），补一遍
-    if (n == 0) {
-        int m = 0;
-        for (size_t i = 0; i + 16 < (size_t)sz && m < 8; i++) {
-            if (buf[i] == 'c' && buf[i+1] == 0 && buf[i+2] == 'o' && buf[i+3] == 0 &&
-                buf[i+4] == 'm' && buf[i+5] == 0 && buf[i+6] == '.' && buf[i+7] == 0) {
-                char tmp[96]; int k = 0;
-                size_t j = i;
-                while (j + 1 < (size_t)sz && k < 95 && buf[j+1] == 0 && printable(buf[j])) {
-                    tmp[k++] = (char)buf[j]; j += 2;
-                }
-                tmp[k] = 0;
-                if (k >= 8) { snprintf(ids[m], 96, "%s", tmp); m++; }
-                i = j;
-            }
-        }
-        n = m;
-    }
+    if (n == 0) n = extract_ids_utf16(buf, (size_t)sz, ids, 8);
     printf("    Info.plist: %s\n", plist);
     if (n == 0) printf("    (没找到 bundle id 候选)\n");
     for (int i = 0; i < n; i++) printf("    bundle候选: %s\n", ids[i]);
