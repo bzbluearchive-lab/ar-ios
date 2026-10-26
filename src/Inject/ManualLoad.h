@@ -394,29 +394,47 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
     if (entry) {
         uint64_t tls = grab_tls_from_target(task);
         uintptr_t noteAddr = notePath ? write_string(task, notePath) : 0;
-        if (noteAddr) printf("[mload] 面包屑路径已写入目标: 0x%llx (%s)\n",
-    // 回读入口首指令，确认代码真的写进去了
-    if (entry) {
+        if (noteAddr)
+            printf("[mload] 面包屑路径已写入目标: 0x%llx (%s)\n",
+                   (unsigned long long)noteAddr, notePath);
+
+        printf("[mload] 调用入口 %s @ 0x%llx (x0=0x%llx) 方式=%s\n", entrySym,
+               (unsigned long long)entry, (unsigned long long)noteAddr,
+               hijackEntry ? "劫持已有线程" : "新建线程");
+        if (hijackEntry) {
+            if (!hijack::hijack_call(task, entry, (uint64_t)noteAddr)) {
+                printf("[mload] 劫持失败，回退到新建线程\n");
+                call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls);
+            }
+        } else {
+            call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls);
+        }
+
+        // 回读入口首指令，确认代码真的写进去了
         uint32_t insn = 0;
         vm_size_t got2 = 0;
         if (vm_read_overwrite(task, (vm_address_t)entry, 4, (vm_address_t)&insn, &got2) == KERN_SUCCESS && got2 == 4) {
             printf("[mload] 入口首指令 = 0x%08x%s\n", insn,
                    (insn == 0 || insn == 0xFFFFFFFF) ? "  << 全 0/全 F，代码没写进去！" : "");
         }
-    }
 
-    // 硬证据：轮询目标线程，看有没有 PC 落在映射范围内（不依赖目标写文件）
-    uint64_t samplePc = 0;
-    int hit = 0;
-    for (int t = 0; t < 50; t++) {
-        usleep(20 * 1000);
-        hit = hijack::threads_running_in_range(task, img.remoteBase,
-                                               img.remoteBase + 0x20000, &samplePc);
-        if (hit) break;
+        // 硬证据：轮询目标线程，看有没有 PC 落在映射范围内（不依赖目标写文件）
+        uint64_t samplePc = 0;
+        int hit = 0;
+        for (int t = 0; t < 50; t++) {
+            usleep(20 * 1000);
+            hit = hijack::threads_running_in_range(task, img.remoteBase,
+                                                   img.remoteBase + 0x20000, &samplePc);
+            if (hit) break;
+        }
+        printf("[mload] 执行探测: 映射范围内的线程数=%d 样本PC=0x%llx\n",
+               hit, (unsigned long long)samplePc);
+        if (!hit) printf("[mload] 代码没有开始执行（PC 从未落在映射范围内）\n");
+    } else {
+        printf("[mload] 没找到入口符号 %s（只跑了 init）\n", entrySym ? entrySym : "(null)");
     }
-    printf("[mload] 执行探测: 映射范围内的线程数=%d 样本PC=0x%llx\n",
-           hit, (unsigned long long)samplePc);
-    if (!hit) printf("[mload] 代码没有开始执行（PC 从未落在映射范围内）\n");
 
     return img.remoteBase;
+}
+
 } // namespace mload
