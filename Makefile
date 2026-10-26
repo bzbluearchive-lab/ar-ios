@@ -16,9 +16,9 @@
 THEOS ?= $(HOME)/theos
 export THEOS
 
-.PHONY: all host daemon payload package clean
+.PHONY: all host daemon payload payload_manual package clean
 
-all: host daemon payload
+all: host daemon payload payload_manual
 
 host:
 	@$(MAKE) -C host
@@ -29,6 +29,9 @@ daemon:
 payload:
 	@$(MAKE) -C payload
 
+payload_manual:
+	@$(MAKE) -C payload_manual
+
 package: all
 	@bash tools/package.sh
 
@@ -36,4 +39,5 @@ clean:
 	@$(MAKE) -C host clean    || true
 	@$(MAKE) -C daemon clean  || true
 	@$(MAKE) -C payload clean || true
+	@$(MAKE) -C payload_manual clean || true
 	@rm -rf build

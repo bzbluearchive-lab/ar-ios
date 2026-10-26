@@ -16,6 +16,7 @@
 #include "../src/Inject/AppInspect.h"
 #include "../src/Inject/BundleInfo.h"
 #include "../src/Inject/ContainerCopy.h"
+#include "../src/Inject/ManualLoad.h"
 #include "../src/Kernel/KernelBackend.h"
 #include "../src/Kernel/BuildTable.h"
 #include "../src/Kernel/KernelCache.h"
@@ -123,7 +124,33 @@ static NSString* payloadPath(void) {
 //      所以 daemon 的生命周期对我们没有价值。
 // RemoteLoad 里的 printf 会被重定向到界面上显示的那个日志文件。
 // ---------------------------------------------------------------------------
-static void ARDumpBreadcrumbs(void);   // 前向声明
+// 手动映射注入：不走 dlopen，自己把段映射进目标（绕开沙盒 exec 限制与 library validation）
+static void ARManualInject(const char* kw) {
+    printf("\n=== 手动映射注入 ===\n");
+    const char* target = (kw && strncmp(kw, "com.", 4) == 0) ? kw : "com.proximabeta.mf.uamo";
+    char path[1024] = {0};
+    pid_t pid = bundleinfo::find_pid_by_bundle(target, 1024, path, sizeof(path));
+    printf("[mload] 目标 bundle=%s pid=%d\n", target, pid);
+    if (!pid) { printf("[mload] 找不到目标，先打开游戏\n"); return; }
+    printf("[mload] path=%s\n", path);
+
+    // 用我们的 payload_manual（不定义新 ObjC 类）
+    NSString* dylib = [[NSBundle mainBundle] pathForResource:@"ARPayloadManual" ofType:@"dylib"];
+    if (!dylib) dylib = [[NSBundle mainBundle] pathForResource:@"ARPayload" ofType:@"dylib"];
+    if (!dylib) { printf("[mload] 包里找不到 payload dylib\n"); return; }
+    printf("[mload] payload=%s\n", dylib.UTF8String);
+
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    printf("[mload] task_for_pid(%d) -> %d\n", pid, kr);
+    if (kr != KERN_SUCCESS) return;
+
+    mload::map_and_call(task, dylib.UTF8String, "arp_entry");
+    mach_port_deallocate(mach_task_self(), task);
+    printf("=== 手动映射结束 ===\n");
+}
+
+static void ARDumpBreadcrumbs(void);
 
 static void ARInjectSpringBoard(const char* kw) {
     NSString* pp = payloadPath();
@@ -244,6 +271,12 @@ static void ARInjectSpringBoard(const char* kw) {
     [ana addTarget:self action:@selector(onAnalyze) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:ana];
 
+    // 手动映射注入（绕开 dlopen）
+    UIButton* man = [UIButton buttonWithType:UIButtonTypeSystem];
+    man.frame = CGRectMake(pad, 344, w - pad*2, 44);
+    [man setTitle:@"手动映射注入（绕开 dlopen）" forState:UIControlStateNormal];
+    [man addTarget:self action:@selector(onManual) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:man];
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
     scan.frame = CGRectMake(pad*2 + (w - pad*3)/2, 190, (w - pad*3)/2, 48);
@@ -260,7 +293,7 @@ static void ARInjectSpringBoard(const char* kw) {
     self.keyword.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
     [self.view addSubview:self.keyword];
 
-    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 356, w - pad*2, self.view.bounds.size.height - 376)];
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 400, w - pad*2, self.view.bounds.size.height - 420)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     [self.view addSubview:self.logView];
@@ -337,7 +370,7 @@ static void ARDumpBreadcrumbs(void) {
         NSString* tmp = [NSString stringWithFormat:@"%@/%@/tmp", base, d];
         NSArray* files = [fm contentsOfDirectoryAtPath:tmp error:nil];
         for (NSString* f in files) {
-            if (![f hasPrefix:@"ar_loaded_"]) continue;
+            if (![f hasPrefix:@"ar_loaded_"] && ![f hasPrefix:@"ar_manual_"]) continue;
             NSString* full = [NSString stringWithFormat:@"%@/%@", tmp, f];
             NSString* content = [NSString stringWithContentsOfFile:full
                                                          encoding:NSUTF8StringEncoding error:nil];
@@ -426,6 +459,22 @@ static void ARScanOnly(const char* kw) {
                                                      encoding:NSUTF8StringEncoding error:nil];
             self.logView.text = log ?: @"(没有日志)";
             self.status.text = @"扫描完成，未注入";
+        });
+    });
+}
+
+- (void)onManual {
+    NSString* kw = self.keyword.text;
+    self.status.text = @"正在手动映射…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ARRedirectToLog();
+        ARManualInject(kw.UTF8String);
+        ARDumpBreadcrumbs();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
+                                                     encoding:NSUTF8StringEncoding error:nil];
+            self.logView.text = log ?: @"(没有日志)";
+            self.status.text = @"手动映射完成";
         });
     });
 }

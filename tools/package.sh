@@ -21,6 +21,7 @@ command -v ldid >/dev/null || { echo "ERROR: ldid not found"; exit 1; }
 host_bin=$(find host/.theos/obj    -maxdepth 4 -name 'ARHost'  -type f 2>/dev/null | head -1 || true)
 dmn=$(find      daemon/.theos/obj  -maxdepth 4 -name 'ARDaemon' -type f 2>/dev/null | head -1 || true)
 pay=$(find      payload/.theos/obj -maxdepth 4 -name '*ARPayload*.dylib' -type f 2>/dev/null | head -1 || true)
+paym=$(find     payload_manual/.theos/obj -maxdepth 4 -name '*ARPayloadManual*.dylib' -type f 2>/dev/null | head -1 || true)
 
 echo "host    = ${host_bin:-<missing>}"
 echo "daemon  = ${dmn:-<missing>}"
@@ -58,6 +59,7 @@ mk_app() {
     cp host/Info.plist "$dir/Info.plist"
     [ -n "${dmn:-}" ] && { cp "$dmn" "$dir/ARDaemon"; chmod +x "$dir/ARDaemon"; }
     cp "$pay" "$dir/ARPayload.dylib"
+    [ -n "${paym:-}" ] && cp "$paym" "$dir/ARPayloadManual.dylib"
     chmod +x "$dir/ARHost"
     $PB -c "Set :CFBundleIdentifier $bid"   "$dir/Info.plist"
     $PB -c "Set :CFBundleDisplayName $disp" "$dir/Info.plist"
@@ -85,7 +87,7 @@ build_variant() {
 }
 
 # P2b = 无沙盒 + 拿 task port 的权限（这两组各自都验证过不崩）
-build_variant G16 com.local.arg16 "AR G16" build/ents/P2b.plist ARHost-G16.ipa
+build_variant G17 com.local.arg17 "AR G17" build/ents/P2b.plist ARHost-G17.ipa
 
 
 echo
