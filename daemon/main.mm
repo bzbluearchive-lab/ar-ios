@@ -22,6 +22,7 @@
 #include <time.h>
 #include "../src/Inject/RemoteLoad.h"
 #include "../src/Inject/BundleInfo.h"
+#include "../src/Inject/ManualLoad.h"
 
 static FILE* g_log = NULL;
 
@@ -102,9 +103,17 @@ int main(int argc, char** argv) {
             }
 
             if (target && target != lastInjected) {
-                L("目标 pid=%d（%s），开始注入", target, how);
-                bool ok = rload::inject_pid(target, payload);
-                L("注入结果=%s pid=%d", ok ? "已投递" : "失败", target);
+                L("目标 pid=%d（%s），开始手动映射注入", target, how);
+                mach_port_t task = MACH_PORT_NULL;
+                kern_return_t kr = task_for_pid(mach_task_self(), target, &task);
+                L("task_for_pid(%d) -> %d", target, kr);
+                if (kr == KERN_SUCCESS) {
+                    uintptr_t rb = mload::map_and_call(task, payload, "arp_entry");
+                    mach_port_deallocate(mach_task_self(), task);
+                    L("手动映射完成 base=0x%llx", (unsigned long long)rb);
+                } else {
+                    L("拿不到 task port，跳过");
+                }
                 lastInjected = target;
             } else if (!target) {
                 L("tick %d：目标不在运行", tick);

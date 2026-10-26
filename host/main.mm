@@ -343,7 +343,9 @@ static void ARInjectSpringBoard(const char* kw) {
     [[NSFileManager defaultManager] removeItemAtPath:stopFlagPath() error:nil];
 
     NSString* dp = daemonPath();
-    NSString* pp = payloadPath();
+    // daemon 用不定义 ObjC 类的手动映射版 payload
+    NSString* pp = [[NSBundle mainBundle] pathForResource:@"ARPayloadManual" ofType:@"dylib"];
+    if (!pp) pp = payloadPath();
     if (!dp || !pp) {
         self.status.text = @"缺少 ARDaemon 或 ARPayload，检查打包步骤";
         return;
