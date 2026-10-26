@@ -17,6 +17,7 @@
 #include "../src/Inject/BundleInfo.h"
 #include "../src/Inject/ContainerCopy.h"
 #include "../src/Inject/ManualLoad.h"
+#include "../src/Game/Ue4Remote.h"
 #include "../src/Kernel/KernelBackend.h"
 #include "../src/Kernel/BuildTable.h"
 #include "../src/Kernel/KernelCache.h"
@@ -169,7 +170,14 @@ static void ARManualInject(const char* kw) {
         snprintf(note, sizeof(note), "%s/tmp/ar_manual_probe.txt", container);
         printf("[mload] 面包屑路径=%s\n", note);
     }
-    mload::map_and_call(task, dylib.UTF8String, "arp_entry", note[0] ? note : nullptr);
+    mload::map_and_call(task, dylib.UTF8String, "arp_entry", note[0] ? note : nullptr, true);
+
+    // 顺手读目标的主镜像基址与路径（为后面定位 UE4 全局变量做准备）
+    char imgPath[512] = {0};
+    uint64_t imgBase = ue4r::main_image_base(task, imgPath, sizeof(imgPath));
+    printf("[ue4r] 目标主镜像 base=0x%llx path=%s\n",
+           (unsigned long long)imgBase, imgPath[0] ? imgPath : "(未取到)");
+
     mach_port_deallocate(mach_task_self(), task);
     printf("=== 手动映射结束 ===\n");
 }

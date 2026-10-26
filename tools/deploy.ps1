@@ -6,20 +6,31 @@
 #   The token is NEVER stored in this repo. It is read from, in order:
 #     1. -Token parameter
 #     2. $env:AR_GH_TOKEN
-#     3. %USERPROFILE%\.ar_gh_token   (a file outside the project, one line, no newline needed)
+#     3. %USERPROFILE%\.ar_gh_token
 #   Committing a token to a public repo makes GitHub secret-scanning revoke it instantly.
 #
-# Repo notes:
+# REPO NOTES:
 #   - private repos on this account have no macOS minutes left, so the repo is flipped
-#     public for the build (public repos get free runners) and restored afterwards.
-#   - the repo also carries someone else's build-esp workflow, so runs are matched by
-#     workflow name "build" AND our commit sha.
+#     public for the build (public repos get free runners).
+#   - the repo also carries other workflows (build-esp / build-probe / ...), so runs are
+#     matched by workflow name "build" AND our commit sha.
+#
+# FAILURE MODES THIS VERSION FIXES (all hit for real):
+#   1. Queue took longer than the old 10 min window, script re-privatized the repo, and the
+#      still-queued run could never start (no minutes on private) -> stuck forever.
+#      Fix: try/finally + if the run is still queued at timeout, keep the repo public and
+#      do NOT cancel our run.
+#   2. Duplicate queued runs from earlier dispatches held the concurrency slot.
+#      Fix: cancel every queued/in_progress run of workflow "build" before dispatching.
 
 param(
     [string]$Message = "update",
     [string]$Token,
     [string]$RepoName = "ar-ios",
-    [switch]$NoBuild
+    [string]$Owner,
+    [int]$TimeoutMinutes = 40,
+    [switch]$NoBuild,
+    [switch]$KeepPublic
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,79 +51,139 @@ $hdr = @{
     'X-GitHub-Api-Version' = '2022-11-28'
 }
 
-$me = Invoke-RestMethod -Uri "$api/user" -Headers $hdr -Method Get
-$login = $me.login
-$base = "$api/repos/$login/$RepoName"
+function Api([string]$method, [string]$uri, $bodyObj = $null) {
+    for ($try = 1; $try -le 3; $try++) {
+        try {
+            if ($bodyObj -ne $null) {
+                $json = $bodyObj | ConvertTo-Json -Depth 8
+                return Invoke-RestMethod -Uri $uri -Headers $hdr -Method $method `
+                       -Body ([Text.Encoding]::UTF8.GetBytes($json))
+            }
+            return Invoke-RestMethod -Uri $uri -Headers $hdr -Method $method
+        } catch {
+            $code = 0
+            if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+            if ($code -eq 401) { throw "token invalid (401)" }
+            if ($code -ge 400 -and $code -lt 500) { throw }
+            if ($try -eq 3) { throw }
+            Start-Sleep -Seconds 5
+        }
+    }
+}
 
-# ---------- 1. push whole tree as ONE commit ----------
+$me = Api 'Get' "$api/user"
+$login = if ($Owner) { $Owner } else { $me.login }
+$base = "$api/repos/$login/$RepoName"
+"login=$login repo=$RepoName"
+
+# ---------- 1. push whole tree as one commit ----------
 $exclude = '(^|\\)(build|\.theos|build-logs|\.git|out)(\\|$)'
 $files = Get-ChildItem $root -Recurse -File -Force |
     Where-Object { $_.FullName.Replace($root + '\', '') -notmatch $exclude } |
     ForEach-Object { [pscustomobject]@{ Rel = ($_.FullName.Replace($root + '\', '') -replace '\\', '/'); Full = $_.FullName } } |
     Sort-Object Rel
 
-$ref = Invoke-RestMethod -Uri "$base/git/ref/heads/main" -Headers $hdr -Method Get
+$ref = Api 'Get' "$base/git/ref/heads/main"
 $headSha = $ref.object.sha
-$headCommit = Invoke-RestMethod -Uri "$base/git/commits/$headSha" -Headers $hdr -Method Get
+$headCommit = Api 'Get' "$base/git/commits/$headSha"
 
 $entries = @()
 foreach ($f in $files) {
     $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($f.Full))
-    $blob = Invoke-RestMethod -Uri "$base/git/blobs" -Headers $hdr -Method Post -Body ([Text.Encoding]::UTF8.GetBytes((@{ content = $b64; encoding = 'base64' } | ConvertTo-Json)))
+    $blob = Api 'Post' "$base/git/blobs" @{ content = $b64; encoding = 'base64' }
     $entries += @{ path = $f.Rel; mode = '100644'; type = 'blob'; sha = $blob.sha }
 }
-$tree = Invoke-RestMethod -Uri "$base/git/trees" -Headers $hdr -Method Post -Body ([Text.Encoding]::UTF8.GetBytes((@{ base_tree = $headCommit.tree.sha; tree = $entries } | ConvertTo-Json -Depth 6)))
-$nc = Invoke-RestMethod -Uri "$base/git/commits" -Headers $hdr -Method Post -Body ([Text.Encoding]::UTF8.GetBytes((@{ message = $Message; tree = $tree.sha; parents = @($headSha) } | ConvertTo-Json -Depth 4)))
-$null = Invoke-RestMethod -Uri "$base/git/refs/heads/main" -Headers $hdr -Method Patch -Body ([Text.Encoding]::UTF8.GetBytes((@{ sha = $nc.sha } | ConvertTo-Json)))
-"pushed $($nc.sha.Substring(0,8))  ($($files.Count) files)"
+$tree = Api 'Post' "$base/git/trees" @{ base_tree = $headCommit.tree.sha; tree = $entries }
+$nc = Api 'Post' "$base/git/commits" @{ message = $Message; tree = $tree.sha; parents = @($headSha) }
+$null = Api 'Patch' "$base/git/refs/heads/main" @{ sha = $nc.sha }
+"pushed $($nc.sha.Substring(0,8)) ($($files.Count) files)"
 
 if ($NoBuild) { return }
 
-# ---------- 2. public -> dispatch ----------
-$null = Invoke-RestMethod -Uri $base -Headers $hdr -Method Patch -Body ([Text.Encoding]::UTF8.GetBytes((@{ private = $false } | ConvertTo-Json)))
-"repo set public (free runners)"
-$wfs = Invoke-RestMethod -Uri "$base/actions/workflows" -Headers $hdr -Method Get
-$bw = $wfs.workflows | Where-Object { $_.path -eq '.github/workflows/build.yml' }
-$null = Invoke-RestMethod -Uri "$base/actions/workflows/$($bw.id)/dispatches" -Headers $hdr -Method Post -Body ([Text.Encoding]::UTF8.GetBytes((@{ ref = 'main' } | ConvertTo-Json)))
-"dispatched build"
-
-# ---------- 3. wait ----------
 $run = $null
-Start-Sleep -Seconds 15
-for ($i = 1; $i -le 40; $i++) {
-    $runs = Invoke-RestMethod -Uri "$base/actions/runs?per_page=8" -Headers $hdr -Method Get
-    $run = $runs.workflow_runs | Where-Object { $_.name -eq 'build' -and $_.head_sha -eq $nc.sha } | Select-Object -First 1
-    if ($run) {
-        "$($run.status)/$($run.conclusion)"
-        if ($run.status -eq 'completed') { break }
-    }
-    Start-Sleep -Seconds 15
+$restored = $false
+function Restore-Private {
+    if ($script:restored) { return }
+    if ($KeepPublic) { "repo left PUBLIC (-KeepPublic)"; $script:restored = $true; return }
+    try {
+        $null = Api 'Patch' $base @{ private = $true }
+        "repo restored private"
+    } catch { "WARN: could not restore private: $($_.Exception.Message)" }
+    $script:restored = $true
 }
 
-# ---------- 4. fetch or report ----------
-$out = Join-Path $root 'out'
-if ($run -and $run.conclusion -eq 'success') {
-    $arts = Invoke-RestMethod -Uri "$base/actions/runs/$($run.id)/artifacts" -Headers $hdr -Method Get
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    New-Item -ItemType Directory -Path $out | Out-Null
-    Invoke-WebRequest -Uri $arts.artifacts[0].archive_download_url -Headers $hdr -OutFile (Join-Path $out 'r.zip') -UseBasicParsing
-    Expand-Archive -Path (Join-Path $out 'r.zip') -DestinationPath $out -Force
-    Get-ChildItem "C:\Users\92072\Desktop" -Filter 'ARHost*.ipa' -ErrorAction SilentlyContinue | Remove-Item -Force
-    Get-ChildItem $out -Filter '*.ipa' | Sort-Object Name | ForEach-Object {
-        Copy-Item $_.FullName "C:\Users\92072\Desktop\$($_.Name)" -Force
-        "  $($_.Name)  $([math]::Round($_.Length/1KB,1)) KB"
-    }
-    "copied to Desktop"
-} elseif ($run) {
-    $j = Invoke-RestMethod -Uri "$base/actions/runs/$($run.id)/jobs" -Headers $hdr -Method Get
-    foreach ($s in $j.jobs[0].steps) { "  {0,-24} {1}/{2}" -f $s.name, $s.status, $s.conclusion }
-    $lf = Join-Path $env:TEMP 'deploy.log'
-    Invoke-WebRequest -Uri "$base/actions/jobs/$($j.jobs[0].id)/logs" -Headers $hdr -OutFile $lf -UseBasicParsing
-    Get-Content $lf -Encoding UTF8 | Select-String -Pattern 'error:|ERROR|No such|undeclared|expected|##\[error\]' | Select-Object -Last 15 | ForEach-Object { $_.Line -replace '^\S+Z\s*', '' }
-} else {
-    "no run found for this commit"
-}
+try {
+    # ---------- 2. public + cancel stale runs + dispatch ----------
+    $null = Api 'Patch' $base @{ private = $false }
+    "repo set public (free runners)"
 
-# ---------- 5. restore private ----------
-$null = Invoke-RestMethod -Uri $base -Headers $hdr -Method Patch -Body ([Text.Encoding]::UTF8.GetBytes((@{ private = $true } | ConvertTo-Json)))
-"repo restored private"
+    $recent = Api 'Get' "$base/actions/runs?per_page=30"
+    $stale = $recent.workflow_runs | Where-Object {
+        $_.name -eq 'build' -and ($_.status -eq 'queued' -or $_.status -eq 'in_progress')
+    }
+    foreach ($r in $stale) {
+        try { $null = Api 'Post' "$base/actions/runs/$($r.id)/cancel"; "cancelled stale run #$($r.run_number)" }
+        catch { "cancel #$($r.run_number) rejected (409 = already finishing)" }
+    }
+
+    $wfs = Api 'Get' "$base/actions/workflows"
+    $bw = $wfs.workflows | Where-Object { $_.path -eq '.github/workflows/build.yml' }
+    $null = Api 'Post' "$base/actions/workflows/$($bw.id)/dispatches" @{ ref = 'main' }
+    "dispatched build"
+
+    # ---------- 3. wait (match name AND sha) ----------
+    $iterations = [int](($TimeoutMinutes * 60) / 15)
+    for ($i = 1; $i -le $iterations; $i++) {
+        $runs = Api 'Get' "$base/actions/runs?per_page=10"
+        $run = $runs.workflow_runs | Where-Object { $_.name -eq 'build' -and $_.head_sha -eq $nc.sha } | Select-Object -First 1
+        if ($run) {
+            "{0,5}s: {1}/{2}" -f ($i*15), $run.status, $run.conclusion
+            if ($run.status -eq 'completed') { break }
+        } else { "{0,5}s: no run yet" -f ($i*15) }
+        Start-Sleep -Seconds 15
+    }
+
+    if (-not $run -or $run.status -ne 'completed') {
+        "runner queue timeout: repo kept PUBLIC so the queued run can still start."
+        "re-run this script later with -NoBuild:$false to just fetch, or wait and download manually."
+        Restore-Private
+        return
+    }
+
+    # ---------- 4. fetch or report ----------
+    $out = Join-Path $root 'out'
+    if ($run.conclusion -eq 'success') {
+        $arts = Api 'Get' "$base/actions/runs/$($run.id)/artifacts"
+        if (-not $arts.artifacts -or $arts.artifacts.Count -eq 0) { throw "run succeeded but has no artifacts" }
+        if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+        New-Item -ItemType Directory -Path $out | Out-Null
+        $zip = Join-Path $out 'artifact.zip'
+        Invoke-WebRequest -Uri $arts.artifacts[0].archive_download_url -Headers $hdr `
+                          -OutFile $zip -UseBasicParsing
+        Expand-Archive -Path $zip -DestinationPath $out -Force
+        Get-ChildItem "C:\Users\92072\Desktop" -Filter 'ARHost*.ipa' -ErrorAction SilentlyContinue | Remove-Item -Force
+        Get-ChildItem $out -Filter '*.ipa' | Sort-Object Name | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path "C:\Users\92072\Desktop" $_.Name) -Force
+            "  $($_.Name)  $([math]::Round($_.Length/1KB,1)) KB"
+        }
+        "copied to Desktop"
+    } else {
+        "conclusion=$($run.conclusion)"
+        $jobs = Api 'Get' "$base/actions/runs/$($run.id)/jobs"
+        foreach ($st in $jobs.jobs[0].steps) { "  {0,-24} {1}/{2}" -f $st.name, $st.status, $st.conclusion }
+        try {
+            $lf = Join-Path $env:TEMP 'deploy.log'
+            Invoke-WebRequest -Uri "$base/actions/jobs/$($jobs.jobs[0].id)/logs" -Headers $hdr `
+                              -OutFile $lf -UseBasicParsing
+            Get-Content $lf -Encoding UTF8 |
+                Select-String -Pattern 'error:|ERROR|No such|undeclared|##\[error\]' |
+                Select-Object -Last 15 | ForEach-Object { $_.Line -replace '^\S+Z\s*', '' }
+        } catch {
+            "job log not available yet (BlobNotFound) - open the run page in a browser"
+        }
+    }
+}
+finally {
+    Restore-Private
+}
+"done. commit=$($nc.sha.Substring(0,8)) run=$($run.run_number)"

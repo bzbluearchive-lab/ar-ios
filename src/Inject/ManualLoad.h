@@ -23,6 +23,7 @@
 #include <mach-o/loader.h>
 #include <mach-o/fixup-chains.h>
 #include <mach-o/nlist.h>
+#include "ThreadHijack.h"
 
 namespace mload {
 
@@ -251,7 +252,7 @@ static inline uintptr_t write_string(mach_port_t task, const char* s) {
 }
 
 // ---------------- 主流程：把 dylib 手动映射进目标并调用入口 ----------------
-inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const char* entrySym, const char* notePath = nullptr) {
+inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const char* entrySym, const char* notePath = nullptr, bool hijackEntry = false) {
     Image img;
     FILE* f = fopen(dylibPath, "rb");
     if (!f) { printf("[mload] 打不开 %s\n", dylibPath); return 0; }
@@ -394,9 +395,17 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
         uintptr_t noteAddr = notePath ? write_string(task, notePath) : 0;
         if (noteAddr) printf("[mload] 面包屑路径已写入目标: 0x%llx (%s)\n",
                              (unsigned long long)noteAddr, notePath);
-        printf("[mload] 调用入口 %s @ 0x%llx (x0=0x%llx)\n", entrySym,
-               (unsigned long long)entry, (unsigned long long)noteAddr);
-        call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls);
+        printf("[mload] 调用入口 %s @ 0x%llx (x0=0x%llx) 方式=%s\n", entrySym,
+               (unsigned long long)entry, (unsigned long long)noteAddr,
+               hijackEntry ? "劫持已有线程" : "新建线程");
+        if (hijackEntry) {
+            if (!hijack::hijack_call(task, entry, (uint64_t)noteAddr)) {
+                printf("[mload] 劫持失败，回退到新建线程\n");
+                call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls);
+            }
+        } else {
+            call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls);
+        }
     } else {
         printf("[mload] 没找到入口符号 %s（只跑了 init）\n", entrySym ? entrySym : "(null)");
     }

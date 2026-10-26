@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 static const uint64_t kStaticBase = 0x100000000ULL;
 static const uint64_t kOffGEngine = 0x10dbf9a58ULL;
@@ -214,7 +215,21 @@ static void inprobe_init(void) {
         gAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
         gBase = (uint64_t)_dyld_get_image_header(0);
-        L(@"=== inprobe v3 pid=%d base=0x%llx ===", getpid(), gBase);
+
+        // Try to load the probing logic from the app's Documents first: if dlopen of
+        // an unsigned dylib is permitted on this device, future iterations only need
+        // a small file dropped into Documents (no 2.7 GB repack per round).
+        {
+            NSString* docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+            NSString* ext = [docs stringByAppendingPathComponent:@"probe2.dylib"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:ext]) {
+                void* h = dlopen([ext UTF8String], RTLD_NOW);
+                if (h) { L(@"external probe2.dylib loaded (%s)", dlerror() ?: "ok"); }
+                else   { L(@"external dlopen failed: %s", dlerror() ?: "?"); }
+            }
+        }
+
+        L(@"=== inprobe v7 pid=%d base=0x%llx ===", getpid(), gBase);
 
         // engine needs time; ACE kills us around 60s, so start at 12s and be quick
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)),
@@ -286,6 +301,146 @@ static void inprobe_init(void) {
                     }
                 }
             }
+            // ---- name-free structural discovery ----
+            // A UWorld holds TArray<ULevel*> (tiny Num) and a ULevel holds
+            // TArray<AActor*> (large Num, many distinct vtables). Walk engine
+            // fields one level down and report such arrays with their numbers.
+            L(@"--- structural scan (no names needed) ---");
+            uint64_t imgLo2 = gBase, imgHi2 = gBase + 0x14000000ULL;
+            for (uint64_t eo = 0; eo < 0x1400; eo += 8) {
+                uint64_t obj = lrd64(engine + eo);
+                if (!ptr_ok(obj)) continue;
+                uint64_t vt = lrd64(obj);
+                if (vt < imgLo2 || vt >= imgHi2) continue;
+
+                for (uint64_t ao = 0; ao + 16 < 0x1000; ao += 8) {
+                    uint64_t data = lrd64(obj + ao);
+                    uint32_t num  = lrd32(obj + ao + 8);
+                    uint32_t max  = lrd32(obj + ao + 12);
+                    if (!ptr_ok(data) || num < 8 || num > 40000 || max < num || max > num + 8192) continue;
+                    uint64_t e0 = lrd64(data);
+                    if (!ptr_ok(e0)) continue;
+                    uint64_t v0 = lrd64(e0);
+                    if (v0 < imgLo2 || v0 >= imgHi2) continue;
+
+                    // count distinct vtables in the first 64 elements
+                    uint64_t seen[8];
+                    int nseen = 0;
+                    uint32_t lim = num < 64 ? num : 64;
+                    for (uint32_t k = 0; k < lim && nseen < 8; k++) {
+                        uint64_t ek = lrd64(data + (uint64_t)k * 8);
+                        if (!ptr_ok(ek)) continue;
+                        uint64_t vk = lrd64(ek);
+                        if (vk < imgLo2 || vk >= imgHi2) continue;
+                        bool dup = false;
+                        for (int s = 0; s < nseen; s++) if (seen[s] == vk) { dup = true; break; }
+                        if (!dup) seen[nseen++] = vk;
+                    }
+                    L(@"[S] E+0x%llx obj=0x%llx +0x%llx Num=%u Max=%u distinctVT=%d vt0=0x%llx",
+                      eo, obj, ao, num, max, nseen, v0);
+
+                    // one more level: look for a big array inside the element
+                    for (uint64_t bo = 0; bo + 16 < 0x1000; bo += 8) {
+                        uint64_t d2 = lrd64(e0 + bo);
+                        uint32_t n2 = lrd32(e0 + bo + 8);
+                        uint32_t m2 = lrd32(e0 + bo + 12);
+                        if (!ptr_ok(d2) || n2 < 8 || n2 > 40000 || m2 < n2 || m2 > n2 + 8192) continue;
+                        uint64_t f0 = lrd64(d2);
+                        if (!ptr_ok(f0)) continue;
+                        uint64_t vf = lrd64(f0);
+                        if (vf < imgLo2 || vf >= imgHi2) continue;
+                        L(@"[S2]   elem+0x%llx inner Num=%u Max=%u vt=0x%llx", bo, n2, m2, vf);
+                    }
+                }
+            }
+
+            // ================= deep scan: actor -> component -> bones =================
+            // No names needed. FTransform is 0x30 bytes: FQuat(16) + FVector(12) + FVector(12).
+            // A skeletal mesh component holds TArray<FTransform> with Num in the 40..400 range.
+            L(@"--- deep scan: bone arrays (FTransform stride 0x30) ---");
+
+            int actorArrays = 0;
+            for (uint64_t eo = 0; eo < 0x1400 && actorArrays < 4; eo += 8) {
+                uint64_t world = lrd64(engine + eo);
+                if (!ptr_ok(world)) continue;
+                uint64_t wvt = lrd64(world);
+                if (wvt < imgLo2 || wvt >= imgHi2) continue;
+
+                for (uint64_t ao = 0; ao + 16 < 0x1000; ao += 8) {
+                    uint64_t data = lrd64(world + ao);
+                    uint32_t num  = lrd32(world + ao + 8);
+                    uint32_t max  = lrd32(world + ao + 12);
+                    if (!ptr_ok(data) || num < 8 || num > 40000 || max < num || max > num + 8192) continue;
+                    uint64_t e0 = lrd64(data);
+                    if (!ptr_ok(e0)) continue;
+                    uint64_t v0 = lrd64(e0);
+                    if (v0 < imgLo2 || v0 >= imgHi2) continue;
+
+                    // distinct vtables -> actor-like array?
+                    uint64_t seen[8]; int nseen = 0;
+                    uint32_t lim = num < 64 ? num : 64;
+                    for (uint32_t k = 0; k < lim && nseen < 8; k++) {
+                        uint64_t ek = lrd64(data + (uint64_t)k * 8);
+                        if (!ptr_ok(ek)) continue;
+                        uint64_t vk = lrd64(ek);
+                        if (vk < imgLo2 || vk >= imgHi2) continue;
+                        bool dup = false;
+                        for (int s = 0; s < nseen; s++) if (seen[s] == vk) { dup = true; break; }
+                        if (!dup) seen[nseen++] = vk;
+                    }
+                    if (nseen < 3) continue;             // actors come in many classes
+                    actorArrays++;
+                    L(@"[A] GEngine+0x%llx -> 0x%llx  arr+0x%llx Num=%u distinctVT=%d", eo, world, ao, num, nseen);
+
+                    // inspect up to 3 actors
+                    for (uint32_t ai = 0; ai < 3 && ai < num; ai++) {
+                        uint64_t act = lrd64(data + (uint64_t)ai * 8);
+                        if (!ptr_ok(act)) continue;
+                        uint64_t avt = lrd64(act);
+                        if (avt < imgLo2 || avt >= imgHi2) continue;
+                        L(@"[A%d] actor=0x%llx vt=0x%llx", ai, act, avt);
+
+                        // components: objects inside the actor
+                        int comps = 0;
+                        for (uint64_t co = 0; co < 0x1000 && comps < 40; co += 8) {
+                            uint64_t comp = lrd64(act + co);
+                            if (!ptr_ok(comp)) continue;
+                            uint64_t cvt = lrd64(comp);
+                            if (cvt < imgLo2 || cvt >= imgHi2) continue;
+                            comps++;
+
+                            // does this component hold a bone transform array?
+                            for (uint64_t bo = 0; bo + 16 < 0x1000; bo += 8) {
+                                uint64_t bd = lrd64(comp + bo);
+                                uint32_t bn = lrd32(comp + bo + 8);
+                                uint32_t bm = lrd32(comp + bo + 12);
+                                if (!ptr_ok(bd) || bn < 20 || bn > 600 || bm < bn || bm > bn + 1024) continue;
+                                // verify 3 transforms look like FTransform (quat + pos + scale)
+                                uint8_t tf[0x30 * 3];
+                                if (!lrd(bd, tf, sizeof(tf))) continue;
+                                float* f0 = (float*)(tf);
+                                float* f1 = (float*)(tf + 0x30);
+                                float* f2 = (float*)(tf + 0x60);
+                                bool okq = true;
+                                float* fs[3] = { f0, f1, f2 };
+                                for (int s2 = 0; s2 < 3 && okq; s2++) {
+                                    float x = fs[s2][0], y = fs[s2][1], z = fs[s2][2], w = fs[s2][3];
+                                    if (!(x > -2 && x < 2 && y > -2 && y < 2 && z > -2 && z < 2 && w > -2 && w < 2)) okq = false;
+                                    float sx = fs[s2][12], sy = fs[s2][13], sz = fs[s2][14];
+                                    if (!(sx > 0.01f && sx < 100 && sy > 0.01f && sy < 100 && sz > 0.01f && sz < 100)) okq = false;
+                                }
+                                if (!okq) continue;
+                                L(@"[B]   comp+0x%llx boneArray Num=%u Max=%u pos=(%.1f,%.1f,%.1f)",
+                                  bo, bn, bm, f0[4], f0[5], f0[6]);
+                            }
+                        }
+                        L(@"[A%d] components=%d", ai, comps);
+                    }
+                    if (actorArrays >= 4) break;
+                }
+            }
+            if (actorArrays == 0) L(@"[A] no multi-vtable array found");
+
             L(@"=== done ===");
         });
     }
