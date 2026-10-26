@@ -24,6 +24,28 @@
 #include <unistd.h>
 
 namespace hijack {
+// 扫描目标所有线程，返回 PC 落在 [lo,hi) 内的线程数。
+// 这是"代码有没有真的开始执行"的硬证据 —— 不依赖目标写任何文件。
+inline int threads_running_in_range(mach_port_t task, uint64_t lo, uint64_t hi, uint64_t* samplePc = nullptr) {
+    thread_act_array_t list = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(task, &list, &count) != KERN_SUCCESS || !list) return 0;
+    int n = 0;
+    for (mach_msg_type_number_t i = 0; i < count; i++) {
+        arm_thread_state64_t st;
+        mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(list[i], ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS) {
+            if (st.__pc >= lo && st.__pc < hi) {
+                n++;
+                if (samplePc && !*samplePc) *samplePc = (uint64_t)st.__pc;
+            }
+        }
+        mach_port_deallocate(mach_task_self(), list[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)list, count * sizeof(thread_t));
+    return n;
+}
+
 
 struct SavedThread {
     thread_t tid = MACH_PORT_NULL;
@@ -98,8 +120,10 @@ inline bool hijack_call(mach_port_t task, uintptr_t fn, uint64_t x0,
             printf("[hijack] tid=%u 读寄存器失败，跳过\n", (unsigned)i);
             continue;
         }
-        if (sv.state.__x[18] == 0) {
-            printf("[hijack] tid=%u 的 x18 为 0，跳过（缺 TLS）\n", (unsigned)i);
+        // 注意：x18 是 iOS 保留寄存器，thread_get_state 永远读回 0，
+        // 不能用它判断"有没有 TLS"。这里只排除明显不可用的线程。
+        if (sv.state.__pc == 0) {
+            printf("[hijack] tid=%u PC 为 0，跳过\n", (unsigned)i);
             continue;
         }
         sv.valid = true;

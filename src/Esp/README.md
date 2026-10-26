@@ -109,6 +109,10 @@
 其余部分（目标进程守卫、kill switch、0.8s 后无条件挂渲染点、世界解析独立重试）一行都不用动
 —— `espx::install()` 与 `overlay_install()` 的语义完全一致：**只挂渲染点，不依赖世界就绪**。
 
+> 上面两块 diff 的 `@@` 故意没写行号（`@@ -20,7 +20,8 @@` 这种一改上下文就失效）。
+> 应用方式：`git apply -C1 <patch>`，或按上下文手工合并 —— 上下文行已核对过与当前
+> `Makefile.legacy-tweak` / `Tweak.xm` 逐行一致（含 Makefile 的 tab）。
+
 ### 3.3 可选：真机认领骨骼索引（不改 patch，临时贴进去用完就删）
 
 `try_bringup()` 里"世界就绪"那一支加上：
@@ -121,7 +125,6 @@
         if (const char* dump = getenv("AR_ESP_DUMP")) {
             (void)dump;
             for (size_t i = 0; i < list.size() && i < 64; ++i) {
-                espm::Vec3 h{};
                 espx::bones::MeshRef mr;
                 if (!espx::bones::read_mesh(list[i], mr)) continue;
                 ARLog(@"actor[%zu] bones=%d", i, (int)mr.boneNum);
@@ -297,7 +300,6 @@
 | 明文 UI 文本 | 除 `XDECL` 的 XOR 输入外，无 `skeleton/loot/equipment` 等字面量 | 通过 |
 
 数据通路那一栏的具体断言（全部 PASS）：
-
 ```
 [1] 紧凑布局 0x30 / 平移 0x10   骨骼数=100、bone[0]=C2W 平移、bone[5]=+50cm、越界/负索引返回 false
 [2] C2W 绕 Z 转 90°            局部 (10,0,0) -> 世界 (0,10,0)+C2W    ✔ 四元数组合正确
@@ -310,8 +312,12 @@
 [8] 相机姿态                   yaw=0 正前方落屏幕中心；yaw=90 时 +Y 落屏幕中心 ✔
 ```
 
-### 8.2 真没做过的
+验证脚手架（假内存 + mach/ImGui 桩头 + 对拍脚本）放在 `default-workspace/.tmp-espx/`
+（`test_math.cpp` / `sim/` / `check_esp.py`），**没有入库**；想复跑就照上面三行命令。
+它跑的是**从本目录原样复制**过去的 `.mm` —— 唯一不同的是 `Game/Offsets.hpp` 里那 24 个
+`0x000` 被替换成了测试值。
 
+### 8.2 真没做过的
 `EspRender.mm`（Metal 挂点 + ImGui 后端 + 触摸注入）是**真 ObjC**，本机没有 clang / iOS SDK，
 **未编译验证**。这一段参照的是工程里已知能编过的 `src/Render/Overlay.mm`（同一套
 `@protocol` 自声明 + `method_setImplementation` + `ImGui_ImplMetal_*` 调用顺序），
