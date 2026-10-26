@@ -13,7 +13,7 @@ include $(THEOS)/makefiles/common.mk
 LIBRARY_NAME = ARPayloadManual
 
 ARPayloadManual_FILES = main.mm
-ARPayloadManual_CFLAGS = -fobjc-arc -std=c++17 -I../src
+ARPayloadManual_CFLAGS = -fobjc-arc -std=c++17 -I../src -Wno-error -Wno-unused-function
 ARPayloadManual_FRAMEWORKS = Foundation UIKit
 ARPayloadManual_INSTALL_PATH = /usr/lib
 

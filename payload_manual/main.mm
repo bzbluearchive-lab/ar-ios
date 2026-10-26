@@ -19,8 +19,8 @@ static id  msg0(id o, const char* sel)                        { return ((id(*)(i
 static id  msg1(id o, const char* sel, id a)                  { return ((id(*)(id,SEL,id))objc_msgSend)(o, sel_registerName(sel), a); }
 static void msgb(id o, const char* sel, BOOL a)               { ((void(*)(id,SEL,BOOL))objc_msgSend)(o, sel_registerName(sel), a); }
 static void msgf(id o, const char* sel, float a)              { ((void(*)(id,SEL,float))objc_msgSend)(o, sel_registerName(sel), a); }
-static void msgi(id o, const char* sel, long a)               { ((void(*)(id,SEL,long))objc_msgSend)(o, sel_registerName(sel), a); }
-static void msgr(id o, const char* sel, CGRect r)             { ((void(*)(id,SEL,CGRect))objc_msgSend)(o, sel_registerName(sel), r); }
+static void __attribute__((unused)) msgi(id o, const char* sel, long a)               { ((void(*)(id,SEL,long))objc_msgSend)(o, sel_registerName(sel), a); }
+static void __attribute__((unused)) msgr(id o, const char* sel, CGRect r)             { ((void(*)(id,SEL,CGRect))objc_msgSend)(o, sel_registerName(sel), r); }
 
 static void writeBreadcrumb(const char* tag) {
     @autoreleasepool {
