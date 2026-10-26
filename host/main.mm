@@ -304,8 +304,8 @@ static void ARInjectSpringBoard(const char* kw) {
     // 目标关键词输入框：填游戏在 /var/containers/Bundle/Application/.../<这里>.app 里的名字
     self.keyword = [[UITextField alloc] initWithFrame:CGRectMake(pad, 250, w - pad*2, 40)];
     self.keyword.borderStyle = UITextBorderStyleRoundedRect;
-    self.keyword.placeholder = @"游戏关键词，例如 DeltaForce 或 Arena";
-    self.keyword.text = @"DeltaForce";
+    self.keyword.placeholder = @"留空即只找暗区（UAGame）";
+    self.keyword.text = @"";
     self.keyword.autocapitalizationType = UITextAutocapitalizationTypeNone;
     self.keyword.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
     [self.view addSubview:self.keyword];
@@ -352,13 +352,13 @@ static void ARInjectSpringBoard(const char* kw) {
     }
 
     // 参数：argv[1]=日志路径 argv[2]=payload 路径 argv[3..]=目标关键词
-    NSString* kw = self.keyword.text.length ? self.keyword.text : @"DeltaForce";
+    NSString* kw = self.keyword.text.length ? self.keyword.text : @"UAGame";
     char* argv[] = {
         (char*)dp.UTF8String,
         (char*)daemonLogPath().UTF8String,
         (char*)pp.UTF8String,
         (char*)kw.UTF8String,
-        (char*)"Arena",
+        (char*)"UAGame",
         (char*)"uamo",
         NULL
     };

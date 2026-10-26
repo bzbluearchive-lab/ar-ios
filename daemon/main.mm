@@ -70,8 +70,8 @@ int main(int argc, char** argv) {
             }
         }
         if (nNeedles == 0) {
-            needles[nNeedles++] = "DeltaForce";
-            needles[nNeedles++] = "Arena";
+            // 只认暗区（UAGame / mf.uamo），不要误打三角洲（DeltaForceClient）
+            needles[nNeedles++] = "UAGame";
             needles[nNeedles++] = "uamo";
         }
         for (int i = 0; i < nNeedles; i++) L("关键词[%d]=%s", i, needles[i]);
