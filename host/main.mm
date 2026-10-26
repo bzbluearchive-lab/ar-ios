@@ -131,8 +131,25 @@ static void ARManualInject(const char* kw) {
     char path[1024] = {0};
     pid_t pid = bundleinfo::find_pid_by_bundle(target, 1024, path, sizeof(path));
     printf("[mload] 目标 bundle=%s pid=%d\n", target, pid);
-    if (!pid) { printf("[mload] 找不到目标，先打开游戏\n"); return; }
+
+    if (!pid) {
+        // 兜底 1：按路径片段找
+        static const char* fb[] = { "UAGame", "uamo" };
+        pid = rload::find_by_needles(1024, fb, 2);
+        if (pid) printf("[mload] 按路径兜底命中 pid=%d\n", pid);
+    }
+    if (!pid) {
+        printf("[mload] 找不到目标。当前能看到的进程如下（确认游戏是否真的在运行）：\n");
+        rload::dump_readable(1024, 30);
+        printf("[mload] 若上面没有 UAGame，说明游戏进程已经退出，请重新打开游戏并保持在大厅，\n");
+        printf("[mload] 然后从多任务切回本 app（不要划掉游戏），再点一次。\n");
+        return;
+    }
     printf("[mload] path=%s\n", path);
+
+    // 顺便记下注入前目标是否在运行，便于判断线程何时才真正执行
+    printf("[mload] 注意：游戏在后台时是挂起状态，远程线程要等游戏恢复运行才会执行。\n");
+    printf("[mload] 注入后请立刻切回游戏等 3~5 秒，再回来点「只扫描」看面包屑。\n");
 
     // 用我们的 payload_manual（不定义新 ObjC 类）
     NSString* dylib = [[NSBundle mainBundle] pathForResource:@"ARPayloadManual" ofType:@"dylib"];
