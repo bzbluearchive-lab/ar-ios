@@ -9,6 +9,7 @@
 
 #import <UIKit/UIKit.h>
 #include <unistd.h>
+#include <sys/utsname.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include "DaemonSpawn.h"
@@ -182,6 +183,89 @@ static void ARManualInject(const char* kw) {
     printf("=== 手动映射结束 ===\n");
 }
 
+// ---------------------------------------------------------------------------
+// 导出完整日志：把 daemon 日志 + 面包屑 + 系统信息 + 进程清单写成单个文件，
+// 并同时尝试写入几个「文件」App 里能直接找到的位置。
+// 这样你不用截图，直接把文件发我即可。
+// ---------------------------------------------------------------------------
+static void ARExportLog(void) {
+    NSMutableString* out = [NSMutableString string];
+
+    struct utsname u;
+    uname(&u);
+    [out appendFormat:@"=== AR 日志导出 %@ ===\n", [NSDate date]];
+    [out appendFormat:@"machine: %s\n", u.machine];
+    [out appendFormat:@"kernel : %s\n", u.version];
+    [out appendFormat:@"build  : %s   product: %s\n",
+        buildtable::current_build(), buildtable::product_version()];
+
+    // daemon 日志
+    NSString* dl = daemonLogPath();
+    NSString* dlog = [NSString stringWithContentsOfFile:dl encoding:NSUTF8StringEncoding error:nil];
+    [out appendFormat:@"\n--- daemon log: %@ ---\n%@\n", dl, dlog.length ? dlog : @"(空)"];
+
+    // 面包屑
+    [out appendString:@"\n--- breadcrumbs ---\n"];
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* base = @"/var/mobile/Containers/Data/Application";
+    NSArray* dirs = [fm contentsOfDirectoryAtPath:base error:nil];
+    int bc = 0;
+    for (NSString* d in dirs) {
+        NSString* tmp = [NSString stringWithFormat:@"%@/%@/tmp", base, d];
+        NSArray* files = [fm contentsOfDirectoryAtPath:tmp error:nil];
+        for (NSString* f in files) {
+            if (![f hasPrefix:@"ar_loaded_"] && ![f hasPrefix:@"ar_manual_"]) continue;
+            NSString* full = [NSString stringWithFormat:@"%@/%@", tmp, f];
+            [out appendFormat:@"[%@]\n%@\n", full,
+                [NSString stringWithContentsOfFile:full encoding:NSUTF8StringEncoding error:nil] ?: @"(读不出)"];
+            bc++;
+        }
+    }
+    if (!bc) [out appendString:@"(没有任何面包屑文件)\n"];
+
+    // 进程清单（sysctl 枚举，确认游戏在不在）
+    [out appendString:@"\n--- processes ---\n"];
+    struct kinfo_proc* procs = nullptr;
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    size_t sz = 0;
+    if (sysctl(mib, 4, nullptr, &sz, nullptr, 0) == 0 && sz) {
+        procs = (struct kinfo_proc*)malloc(sz);
+        if (procs && sysctl(mib, 4, procs, &sz, nullptr, 0) == 0) {
+            int n = (int)(sz / sizeof(struct kinfo_proc));
+            for (int i = 0; i < n; i++) {
+                const char* c = procs[i].kp_proc.p_comm;
+                if (!c[0]) continue;
+                [out appendFormat:@"  pid=%-5d comm=%s\n", procs[i].kp_proc.p_pid, c];
+            }
+        }
+        if (procs) free(procs);
+    } else {
+        [out appendString:@"(sysctl 枚举失败)\n"];
+    }
+
+    // 候选输出路径：尽量覆盖「我的 iPad」「iCloud 云盘」「下载」
+    NSMutableArray* targets = [NSMutableArray array];
+    NSArray* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (docs.count) [targets addObject:[docs[0] stringByAppendingPathComponent:@"ar_full_log.txt"]];
+    [targets addObject:@"/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/ar_full_log.txt"];
+    [targets addObject:@"/var/mobile/Media/Downloads/ar_full_log.txt"];
+    [targets addObject:@"/var/mobile/Library/Caches/ar_full_log.txt"];
+
+    printf("\n=== 导出日志 ===\n");
+    for (NSString* t in targets) {
+        NSString* dir = [t stringByDeletingLastPathComponent];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:dir]) {
+            printf("[export] 目录不存在: %s\n", dir.UTF8String);
+            continue;
+        }
+        NSError* err = nil;
+        BOOL ok = [out writeToFile:t atomically:YES encoding:NSUTF8StringEncoding error:&err];
+        printf("[export] %s -> %s%s\n", ok ? "成功" : "失败", t.UTF8String,
+               ok ? "" : (err ? err.localizedDescription.UTF8String : ""));
+    }
+    printf("=== 导出结束（在上面成功的路径里找 ar_full_log.txt）===\n");
+}
+
 static void ARDumpBreadcrumbs(void);
 
 static void ARInjectSpringBoard(const char* kw) {
@@ -308,6 +392,13 @@ static void ARInjectSpringBoard(const char* kw) {
     man.frame = CGRectMake(pad, 344, w - pad*2, 44);
     [man setTitle:@"手动映射注入（绕开 dlopen）" forState:UIControlStateNormal];
     [man addTarget:self action:@selector(onManual) forControlEvents:UIControlEventTouchUpInside];
+
+    // 导出完整日志到「文件」App 可见位置，直接发文件代替截图
+    UIButton* exp = [UIButton buttonWithType:UIButtonTypeSystem];
+    exp.frame = CGRectMake(pad, 390, w - pad*2, 40);
+    [exp setTitle:@"导出完整日志（发我用）" forState:UIControlStateNormal];
+    [exp addTarget:self action:@selector(onExport) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:exp];
     [self.view addSubview:man];
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -325,7 +416,7 @@ static void ARInjectSpringBoard(const char* kw) {
     self.keyword.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
     [self.view addSubview:self.keyword];
 
-    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 400, w - pad*2, self.view.bounds.size.height - 420)];
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 434, w - pad*2, self.view.bounds.size.height - 454)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     [self.view addSubview:self.logView];
@@ -495,6 +586,20 @@ static void ARScanOnly(const char* kw) {
                                                      encoding:NSUTF8StringEncoding error:nil];
             self.logView.text = log ?: @"(没有日志)";
             self.status.text = @"扫描完成，未注入";
+        });
+    });
+}
+
+- (void)onExport {
+    self.status.text = @"正在导出日志…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ARRedirectToLog();
+        ARExportLog();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
+                                                     encoding:NSUTF8StringEncoding error:nil];
+            self.logView.text = log ?: @"(没有日志)";
+            self.status.text = @"已导出，看日志里 [export] 成功的路径";
         });
     });
 }
