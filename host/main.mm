@@ -15,6 +15,7 @@
 #include "../src/Inject/RemoteLoad.h"
 #include "../src/Inject/AppInspect.h"
 #include "../src/Inject/BundleInfo.h"
+#include "../src/Inject/ContainerCopy.h"
 #include "../src/Kernel/KernelBackend.h"
 #include "../src/Kernel/BuildTable.h"
 #include "../src/Kernel/KernelCache.h"
@@ -159,8 +160,21 @@ static void ARInjectSpringBoard(const char* kw) {
     if (byBundle) {
         printf("[inject] 按 bundle id 命中 pid=%d (%s)\n", byBundle, kTargetBundle);
         printf("[inject] path=%s\n", tpath);
-        bool okb = rload::inject_pid(byBundle, pp.UTF8String);
+
+        // 关键：payload 必须放进目标自己的数据容器，否则目标读不到
+        char container[1200], staged[1300];
+        const char* usePath = pp.UTF8String;
+        if (containercopy::data_container_of(kTargetBundle, container, sizeof(container)) &&
+            containercopy::install_payload(container, pp.UTF8String, staged, sizeof(staged))) {
+            usePath = staged;
+            printf("[inject] 使用容器内副本: %s\n", usePath);
+        } else {
+            printf("[inject] 放进目标容器失败，退而使用原路径（大概率打不开）\n");
+        }
+
+        bool okb = rload::inject_pid(byBundle, usePath);
         printf("[inject] 结果=%s\n", okb ? "已注入" : "失败");
+        ARDumpBreadcrumbs();
         return;
     }
     printf("[inject] 按 bundle id 没找到目标，改用关键词匹配\n");
