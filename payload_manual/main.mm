@@ -96,4 +96,8 @@ extern "C" __attribute__((visibility("default")))
 void arp_entry(void) {
     writeBreadcrumb("entry_called");
     buildOverlay();
+    writeBreadcrumb("entry_done");
+    // 绝不返回：返回会跳回 LR(=0) 导致目标进程崩溃。
+    // 这个线程就地睡下去，保持干净。
+    for (;;) sleep(3600);
 }

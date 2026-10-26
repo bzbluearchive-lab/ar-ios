@@ -445,6 +445,8 @@ static void ARScanOnly(const char* kw) {
     kback::dump_status();
     kcache::probe();
 
+    ARDumpBreadcrumbs();
+
     printf("\n=== 各 app 的 bundle id ===\n");
     bundleinfo::dump_all_bundles(1024, 20);
     printf("=== 扫描结束，未做任何注入 ===\n");
