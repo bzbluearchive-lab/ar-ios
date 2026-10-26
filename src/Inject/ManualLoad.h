@@ -113,7 +113,55 @@ static inline bool apply_fixups(Image& img, mach_port_t task) {
     // （remoteBase 取 vmaddr 最小值对齐后的基址，下面在分配时保证）
     uintptr_t bias = img.remoteBase;
 
-    int nRebase = 0, nBind = 0, nFail = 0;
+    int nRebase = 0, nBind = 0, nFail = 0, nSlots = 0;
+
+    // 处理一条链：从 pageAddr + startIdx 开始，按 next*4 步进
+    auto process_chain = [&](uintptr_t pageAddr, uint32_t startIdx, uint32_t pageSize,
+                             uint16_t ptrFmt) {
+        uint32_t idx = startIdx;
+        int guard = 0;
+        while (idx != 0xFFFF && idx < pageSize && guard++ < 20000) {
+            uint64_t slotAddr = pageAddr + idx;
+            uint64_t raw = 0;
+            vm_size_t got = 0;
+            if (vm_read_overwrite(task, (vm_address_t)slotAddr, 8,
+                                  (vm_address_t)&raw, &got) != KERN_SUCCESS || got != 8) {
+                nFail++; return;
+            }
+            nSlots++;
+
+            if (ptrFmt != DYLD_CHAINED_PTR_64 && ptrFmt != DYLD_CHAINED_PTR_64_OFFSET) {
+                printf("[mload] 不支持的指针格式 0x%x\n", ptrFmt);
+                return;
+            }
+
+            dyld_chained_ptr_64_rebase rb;
+            dyld_chained_ptr_64_bind bd;
+            memcpy(&rb, &raw, 8);
+            memcpy(&bd, &raw, 8);
+
+            uint64_t next = 0;
+            if (rb.bind) {
+                const struct dyld_chained_import* impEntry =
+                    (const struct dyld_chained_import*)imports + bd.ordinal;
+                const char* sym = symbols + impEntry->name_offset;
+                void* resolved = dlsym(RTLD_DEFAULT, sym);
+                if (!resolved && sym[0] == '_') resolved = dlsym(RTLD_DEFAULT, sym + 1);
+                if (!resolved) printf("[mload]   bind 未解析 %s\n", sym);
+                uint64_t value = (uint64_t)(uintptr_t)resolved + bd.addend;
+                if (!remote_write(task, slotAddr, &value, 8)) nFail++; else nBind++;
+                next = bd.next;
+            } else {
+                uint64_t value = bias + rb.target;
+                if (!remote_write(task, slotAddr, &value, 8)) nFail++; else nRebase++;
+                next = rb.next;
+            }
+            // ★ next 的单位是 4 字节，不是字节
+            if (next == 0) break;
+            idx += (uint32_t)(next * 4);
+        }
+    };
+
     for (uint32_t seg = 0; seg < si->seg_count; seg++) {
         uint32_t off = si->seg_info_offset[seg];
         if (off == 0) continue;
@@ -121,58 +169,32 @@ static inline bool apply_fixups(Image& img, mach_port_t task) {
             (const struct dyld_chained_starts_in_segment*)((const uint8_t*)si + off);
 
         for (uint16_t pg = 0; pg < ss->page_count; pg++) {
-            uint16_t start = ss->page_start[pg];
-            if (start == DYLD_CHAINED_PTR_START_NONE) continue;
-
+            uint16_t ps = ss->page_start[pg];
+            if (ps == DYLD_CHAINED_PTR_START_NONE) continue;
             uintptr_t pageAddr = bias + ss->segment_offset + (uintptr_t)pg * ss->page_size;
-            uint32_t idx = start;
 
-            while (idx != 0xFFFF && idx < ss->page_size) {
-                uint64_t slotAddr = pageAddr + idx;
-                uint64_t raw = 0;
-                vm_size_t got = 0;
-                if (vm_read_overwrite(task, (vm_address_t)slotAddr, 8,
-                                      (vm_address_t)&raw, &got) != KERN_SUCCESS || got != 8) {
-                    nFail++; break;
+            if (ps & DYLD_CHAINED_PTR_START_MULTI) {
+                // 一页里有多条链：page_start[ps & 0x7FFF] 开始是一串起点，
+                // 带 START_LAST 的那一项是最后一条
+                uint32_t k = (uint32_t)(ps & (uint16_t)~DYLD_CHAINED_PTR_START_MULTI);
+                int guard = 0;
+                while (k < 4096 && guard++ < 4096) {
+                    uint16_t e = ss->page_start[k];
+                    if (e == DYLD_CHAINED_PTR_START_NONE) break;
+                    bool last = (e & DYLD_CHAINED_PTR_START_LAST) != 0;
+                    uint16_t real = (uint16_t)(e & (uint16_t)~DYLD_CHAINED_PTR_START_LAST);
+                    if (real != DYLD_CHAINED_PTR_START_NONE)
+                        process_chain(pageAddr, real, ss->page_size, ss->pointer_format);
+                    if (last) break;
+                    k++;
                 }
-
-                if (ss->pointer_format == DYLD_CHAINED_PTR_64 ||
-                    ss->pointer_format == DYLD_CHAINED_PTR_64_OFFSET) {
-                    dyld_chained_ptr_64_rebase rb;
-                    dyld_chained_ptr_64_bind bd;
-                    memcpy(&rb, &raw, 8);
-                    memcpy(&bd, &raw, 8);
-                    uint64_t next = 0;
-
-                    if (rb.bind) {
-                        uint32_t ordinal = bd.ordinal;
-                        // import 表按 ordinal 步进，大小取决于格式，这里用 name_offset 直接查
-                        const struct dyld_chained_import* impEntry =
-                            (const struct dyld_chained_import*)imports + ordinal;
-                        const char* sym = symbols + impEntry->name_offset;
-                        void* resolved = dlsym(RTLD_DEFAULT, sym);
-                        if (!resolved) resolved = dlsym(RTLD_DEFAULT, sym + 1);  // 去掉前缀 _
-                        uint64_t value = (uint64_t)(uintptr_t)resolved + bd.addend;
-                        printf("[mload]   bind %s -> 0x%llx\n", sym, (unsigned long long)value);
-                        if (!remote_write(task, slotAddr, &value, 8)) nFail++;
-                        else nBind++;
-                        next = bd.next;
-                    } else {
-                        uint64_t value = bias + rb.target;
-                        if (!remote_write(task, slotAddr, &value, 8)) nFail++;
-                        else nRebase++;
-                        next = rb.next;
-                    }
-                    idx += (next == 0) ? 0xFFFF : (uint32_t)next;
-                } else {
-                    printf("[mload] 不支持的指针格式 0x%x\n", ss->pointer_format);
-                    return false;
-                }
+            } else {
+                process_chain(pageAddr, ps, ss->page_size, ss->pointer_format);
             }
         }
     }
 
-    printf("[mload] fixups 完成: rebase=%d bind=%d fail=%d\n", nRebase, nBind, nFail);
+    printf("[mload] fixups: 走过 %d 个槽位\n", nSlots);    printf("[mload] fixups 完成: rebase=%d bind=%d fail=%d\n", nRebase, nBind, nFail);
     return nFail == 0;
 }
 
