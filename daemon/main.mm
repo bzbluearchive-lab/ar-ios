@@ -41,6 +41,47 @@ static void L(const char* fmt, ...) {
     fflush(g_log);
 }
 
+// ---------------- 轻量进程枚举：sysctl（无沙盒进程可直接用） ----------------
+// 相比对 1024 个 pid 逐个 task_for_pid，这个只读一次内核进程表，
+// 对目标几乎无扰动，不会把游戏搞挂。
+static int list_procs(struct kinfo_proc** out) {
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    size_t sz = 0;
+    if (sysctl(mib, 4, nullptr, &sz, nullptr, 0) != 0 || sz == 0) { *out = nullptr; return -1; }
+    struct kinfo_proc* p = (struct kinfo_proc*)malloc(sz);
+    if (!p) { *out = nullptr; return -1; }
+    if (sysctl(mib, 4, p, &sz, nullptr, 0) != 0) { free(p); *out = nullptr; return -1; }
+    *out = p;
+    return (int)(sz / sizeof(struct kinfo_proc));
+}
+
+static pid_t find_pid_comm_fast(const char* needle) {
+    struct kinfo_proc* p = nullptr;
+    int n = list_procs(&p);
+    if (n <= 0 || !p) return 0;
+    pid_t found = 0;
+    for (int i = 0; i < n; i++) {
+        if (strstr(p[i].kp_proc.p_comm, needle)) { found = p[i].kp_proc.p_pid; break; }
+    }
+    free(p);
+    return found;
+}
+
+static void dump_comms(int maxPrint) {
+    struct kinfo_proc* p = nullptr;
+    int n = list_procs(&p);
+    if (n <= 0 || !p) { L("sysctl 枚举失败"); return; }
+    L("当前进程 %d 个：", n);
+    int shown = 0;
+    for (int i = 0; i < n && shown < maxPrint; i++) {
+        const char* c = p[i].kp_proc.p_comm;
+        if (!c[0]) continue;
+        L("  pid=%-5d comm=%s", p[i].kp_proc.p_pid, c);
+        shown++;
+    }
+    free(p);
+}
+
 int main(int argc, char** argv) {
     @autoreleasepool {
         setsid();
@@ -89,18 +130,23 @@ int main(int argc, char** argv) {
         for (;;) {
             tick++;
 
-            // 优先按 bundle id 精确定位
-            pid_t target = bundleinfo::find_pid_by_bundle("com.proximabeta.mf.uamo", 1024, nullptr, 0);
-            const char* how = "bundle";
-            if (!target) {
-                target = rload::find_by_needles(1024, needles, nNeedles);
-                how = "path";
+            // 轻量定位：先用 sysctl 按进程名找（几乎零扰动）
+            pid_t target = 0;
+            const char* how = "comm";
+            for (int i = 0; i < nNeedles && !target; i++) {
+                target = find_pid_comm_fast(needles[i]);
+                if (target) L("sysctl 命中 %s -> pid=%d", needles[i], target);
             }
 
-            // 没命中时，每 5 次循环列一次所有可读路径，方便直接看出游戏叫什么
-            if (!target && (tick % 5 == 1)) {
-                L("未命中，列出当前可读路径：");
-                rload::dump_readable(1024, 20);
+            // 再按 bundle id（需要读 Info.plist，稍重，但仅在必要时用）
+            if (!target) {
+                target = bundleinfo::find_pid_by_bundle("com.proximabeta.mf.uamo", 1024, nullptr, 0);
+                how = "bundle";
+            }
+
+            // 都没命中：每 10 次列一次完整进程名表，用来确认游戏到底在不在
+            if (!target && (tick % 10 == 1)) {
+                dump_comms(40);
             }
 
             if (target && target != lastInjected) {
