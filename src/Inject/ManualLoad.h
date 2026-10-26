@@ -146,7 +146,6 @@ static inline bool apply_fixups(Image& img, mach_port_t task) {
 
                     if (rb.bind) {
                         uint32_t ordinal = bd.ordinal;
-                        const uint8_t* imp = imports;
                         // import 表按 ordinal 步进，大小取决于格式，这里用 name_offset 直接查
                         const struct dyld_chained_import* impEntry =
                             (const struct dyld_chained_import*)imports + ordinal;
@@ -164,7 +163,6 @@ static inline bool apply_fixups(Image& img, mach_port_t task) {
                         else nRebase++;
                         next = rb.next;
                     }
-                    (void)imp;
                     idx += (next == 0) ? 0xFFFF : (uint32_t)next;
                 } else {
                     printf("[mload] 不支持的指针格式 0x%x\n", ss->pointer_format);
