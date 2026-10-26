@@ -23,6 +23,7 @@
 #include "../src/Inject/RemoteLoad.h"
 #include "../src/Inject/BundleInfo.h"
 #include "../src/Inject/ManualLoad.h"
+#include "../src/Inject/ContainerCopy.h"
 
 static FILE* g_log = NULL;
 
@@ -108,7 +109,12 @@ int main(int argc, char** argv) {
                 kern_return_t kr = task_for_pid(mach_task_self(), target, &task);
                 L("task_for_pid(%d) -> %d", target, kr);
                 if (kr == KERN_SUCCESS) {
-                    uintptr_t rb = mload::map_and_call(task, payload, "arp_entry");
+                    char container[1200] = {0};
+                    char note[1400] = {0};
+                    if (containercopy::data_container_of("com.proximabeta.mf.uamo", container, sizeof(container)))
+                        snprintf(note, sizeof(note), "%s/tmp/ar_manual_probe.txt", container);
+                    L("面包屑路径=%s", note[0] ? note : "(none)");
+                    uintptr_t rb = mload::map_and_call(task, payload, "arp_entry", note[0] ? note : nullptr);
                     mach_port_deallocate(mach_task_self(), task);
                     L("手动映射完成 base=0x%llx", (unsigned long long)rb);
                 } else {

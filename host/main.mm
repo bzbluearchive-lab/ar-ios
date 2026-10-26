@@ -162,7 +162,14 @@ static void ARManualInject(const char* kw) {
     printf("[mload] task_for_pid(%d) -> %d\n", pid, kr);
     if (kr != KERN_SUCCESS) return;
 
-    mload::map_and_call(task, dylib.UTF8String, "arp_entry");
+    // 面包屑写到目标自己的容器里（沙盒可写）
+    char container[1200] = {0};
+    char note[1400] = {0};
+    if (containercopy::data_container_of(target, container, sizeof(container))) {
+        snprintf(note, sizeof(note), "%s/tmp/ar_manual_probe.txt", container);
+        printf("[mload] 面包屑路径=%s\n", note);
+    }
+    mload::map_and_call(task, dylib.UTF8String, "arp_entry", note[0] ? note : nullptr);
     mach_port_deallocate(mach_task_self(), task);
     printf("=== 手动映射结束 ===\n");
 }

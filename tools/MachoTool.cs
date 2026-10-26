@@ -536,6 +536,67 @@ static class MachoTool
         Console.WriteLine("callers of 0x{0:x} = {1}", target, hits);
     }
 
+    // 扫 FName 解析特征，定位 GNames 全局 与 Blocks[] 偏移：
+    //   adrp xT, page ; ldr xT, [xT, #off]  ... lsr w?, w?, #16 ... add xT, xT, #imm2
+    static void CmdFnPool(string bin, int topN)
+    {
+        Load(bin);
+        var text = SegOf("__TEXT");
+        long start = (long)text.FileOff, end = (long)(text.FileOff + text.FileSize);
+        ulong vaBase = text.VmAddr;
+        var hist = new Dictionary<string, int>();
+        var sample = new Dictionary<string, ulong>();
+
+        for (long i = start; i + 64 < end; i += 4)
+        {
+            uint w = U32(i);
+            // LSR Wd, Wn, #16  -> 0x53107C00 | Rn<<5 | Rd
+            if ((w & 0xFFC0FC00u) != 0x53107C00u) continue;
+            ulong pc = vaBase + (ulong)(i - start);
+
+            // 往回找最多 8 条：ldr xT,[xT,#imm] 且前一条是 adrp xT
+            int ldrReg = -1; int ldrOff = 0; ulong adrpPage = 0;
+            for (int k = 1; k <= 8; k++)
+            {
+                uint wl = U32(i - 4 * k);
+                int rt, rn, off;
+                if (!IsLdrUimm(wl, out rt, out rn, out off)) continue;
+                if (rt != rn) continue;
+                uint wa = U32(i - 4 * (k + 1));
+                if (!IsAdrp(wa)) continue;
+                if ((int)(wa & 0x1F) != rt) continue;
+                ldrReg = rt; ldrOff = off;
+                adrpPage = AdrpTarget(wa, pc - (ulong)(4 * (k + 1)));
+                break;
+            }
+            if (ldrReg < 0) continue;
+            ulong gnames = adrpPage + (ulong)ldrOff;
+
+            // 往后找最多 6 条：add xT, xT, #imm2  -> Blocks 偏移
+            int blocksOff = -1;
+            for (int k = 1; k <= 6; k++)
+            {
+                uint w2 = U32(i + 4 * k);
+                int rd, rn; long imm;
+                if (IsAddImm64(w2, out rd, out rn, out imm) && rd == ldrReg && rn == ldrReg && imm > 0 && imm < 0x1000)
+                { blocksOff = (int)imm; break; }
+            }
+            string key = string.Format("GNames=0x{0:x} blocksOff=0x{1:x}", gnames, blocksOff);
+            if (!hist.ContainsKey(key)) { hist[key] = 0; sample[key] = pc; }
+            hist[key] = hist[key] + 1;
+        }
+
+        var list = new List<KeyValuePair<string, int>>(hist);
+        list.Sort(delegate (KeyValuePair<string, int> a, KeyValuePair<string, int> b) { return b.Value.CompareTo(a.Value); });
+        Console.WriteLine("FName 特征命中组合 = {0}", list.Count);
+        int n = 0;
+        foreach (var kv in list)
+        {
+            Console.WriteLine("  {0}  x{1}  first-pc=0x{2:x}", kv.Key, kv.Value, sample[kv.Key]);
+            if (++n >= topN) break;
+        }
+    }
+
     static int Main(string[] args)
     {
         try
@@ -552,6 +613,7 @@ static class MachoTool
                 case "disx": CmdDisX(bin, H(args[2]), int.Parse(args[3])); break;
                 case "tarray": CmdTArray(bin, int.Parse(args[2])); break;
                 case "callers": CmdCallers(bin, H(args[2]), int.Parse(args[3])); break;
+                case "fnpool": CmdFnPool(bin, int.Parse(args[2])); break;
                 case "dis": CmdDis(bin, H(args[2]), int.Parse(args[3])); break;
                 case "funcstart": CmdFuncStart(bin, H(args[2])); break;
                 default: Console.WriteLine("unknown cmd: " + cmd); return 2;

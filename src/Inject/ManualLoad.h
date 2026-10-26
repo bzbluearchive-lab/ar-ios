@@ -199,24 +199,59 @@ static inline bool apply_fixups(Image& img, mach_port_t task) {
 }
 
 // ---------------- 调用目标里的函数 ----------------
-static inline kern_return_t call_addr(mach_port_t task, uintptr_t fn, uintptr_t stackTop) {
+// 从目标进程已有线程里取 x18（arm64 的 TLS 指针）。
+// 我们自己创建的线程 x18=0，一碰 @autoreleasepool / NSString 就会崩。
+static inline uint64_t grab_tls_from_target(mach_port_t task) {
+    thread_act_array_t list = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(task, &list, &count) != KERN_SUCCESS || !list) return 0;
+    uint64_t tls = 0;
+    for (mach_msg_type_number_t i = 0; i < count && !tls; i++) {
+        arm_thread_state64_t st;
+        mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(list[i], ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS) {
+            if (st.__x[18] != 0) tls = st.__x[18];
+        }
+        mach_port_deallocate(mach_task_self(), list[i]);
+    }
+    if (list) vm_deallocate(mach_task_self(), (vm_address_t)list,
+                            count * sizeof(thread_t));
+    printf("[mload] 从目标线程取到 x18(TLS)=0x%llx\n", (unsigned long long)tls);
+    return tls;
+}
+
+static inline kern_return_t call_addr(mach_port_t task, uintptr_t fn, uintptr_t stackTop,
+                                      uint64_t x0 = 0, uint64_t x18 = 0) {
     mach_port_t th = MACH_PORT_NULL;
     kern_return_t kr = thread_create(task, &th);
-    if (kr != KERN_SUCCESS) return kr;
+    if (kr != KERN_SUCCESS) { printf("[mload] thread_create -> %d\n", kr); return kr; }
 
     arm_thread_state64_t st;
     memset(&st, 0, sizeof(st));
-    st.__pc = (uint64_t)fn;
-    st.__sp = (uint64_t)(stackTop & ~0xFull);
-    st.__lr = 0;
+    st.__pc    = (uint64_t)fn;
+    st.__sp    = (uint64_t)(stackTop & ~0xFull);
+    st.__lr    = 0;
+    st.__x[0]  = x0;
+    st.__x[18] = x18;          // TLS
     kr = thread_set_state(th, ARM_THREAD_STATE64, (thread_state_t)&st,
                           ARM_THREAD_STATE64_COUNT);
     if (kr == KERN_SUCCESS) kr = thread_resume(th);
+    if (kr != KERN_SUCCESS) printf("[mload] set_state/resume -> %d\n", kr);
     return kr;
 }
 
+// 把一段字符串写进目标进程，返回它在目标里的地址
+static inline uintptr_t write_string(mach_port_t task, const char* s) {
+    if (!s) return 0;
+    size_t len = strlen(s) + 1;
+    vm_address_t addr = 0;
+    if (vm_allocate(task, &addr, (vm_size_t)len, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return 0;
+    if (!remote_write(task, (uint64_t)addr, s, len)) return 0;
+    return (uintptr_t)addr;
+}
+
 // ---------------- 主流程：把 dylib 手动映射进目标并调用入口 ----------------
-inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const char* entrySym) {
+inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const char* entrySym, const char* notePath = nullptr) {
     Image img;
     FILE* f = fopen(dylibPath, "rb");
     if (!f) { printf("[mload] 打不开 %s\n", dylibPath); return 0; }
@@ -355,8 +390,13 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
         }
     }
     if (entry) {
-        printf("[mload] 调用入口 %s @ 0x%llx\n", entrySym, (unsigned long long)entry);
-        call_addr(task, entry, stackTop);
+        uint64_t tls = grab_tls_from_target(task);
+        uintptr_t noteAddr = notePath ? write_string(task, notePath) : 0;
+        if (noteAddr) printf("[mload] 面包屑路径已写入目标: 0x%llx (%s)\n",
+                             (unsigned long long)noteAddr, notePath);
+        printf("[mload] 调用入口 %s @ 0x%llx (x0=0x%llx)\n", entrySym,
+               (unsigned long long)entry, (unsigned long long)noteAddr);
+        call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls);
     } else {
         printf("[mload] 没找到入口符号 %s（只跑了 init）\n", entrySym ? entrySym : "(null)");
     }
