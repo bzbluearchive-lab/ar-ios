@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <dlfcn.h>
+extern "C" int hide_self_image(void);
 
 static const uint64_t kStaticBase = 0x100000000ULL;
 static const uint64_t kOffGEngine = 0x10dbf9a58ULL;
@@ -120,7 +121,7 @@ static bool own_of(uint64_t obj, char* out, size_t cap) {
 }
 
 // ---- bone array detection: TArray<FTransform>, stride 0x30 ----
-static bool looks_transform_array(uint64_t comp, uint64_t off, uint32_t* outNum) {
+__attribute__((unused)) static bool looks_transform_array(uint64_t comp, uint64_t off, uint32_t* outNum) {
     uint64_t data = lrd64(comp + off);
     uint32_t num  = lrd32(comp + off + 8);
     uint32_t max  = lrd32(comp + off + 12);
@@ -160,6 +161,30 @@ static void inprobe_init(void) {
         gAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
         gBase = (uint64_t)_dyld_get_image_header(0);
+
+        // ---- mode switch: Documents/probe_mode.txt ----
+        //   "noop"    : do nothing but log (test whether injection itself is detected)
+        //   "stealth" : hide our image from dyld enumeration, then probe
+        //   (missing) : same as stealth
+        {
+            NSString* docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+            NSString* modePath = [docs stringByAppendingPathComponent:@"probe_mode.txt"];
+            NSString* mode = @"stealth";
+            if ([[NSFileManager defaultManager] fileExistsAtPath:modePath]) {
+                NSString* s = [NSString stringWithContentsOfFile:modePath encoding:NSUTF8StringEncoding error:nil];
+                if (s) {
+                    s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if (s.length) mode = s;
+                }
+            }
+            L(@"mode = %@", mode);
+            if ([mode isEqualToString:@"noop"]) {
+                L(@"noop mode: no hooks, no probing, no threads");
+                return;
+            }
+            int patched = hide_self_image();
+            L(@"image hiding: patched %d pointers (selfIndex=%u)", patched, 0u);
+        }
 
         // optional hot-reload of logic from Documents (cheap iteration if allowed)
         {
@@ -239,32 +264,48 @@ static void inprobe_init(void) {
                 if (!cls_of(mesh, mc, sizeof(mc))) continue;
                 withMesh++;
 
-                // bone array: narrowed windows from static analysis first, then wide
+                // Bone arrays verified statically on this build:
+                //   0x9B8 CachedComponentSpaceTransforms {Data,Num@0x9C0,Max@0x9C4}
+                //   0x940 BoneSpaceTransforms (live)     {Data,Num@0x948}
+                //   0x9A8 CachedBoneSpaceTransforms      {Data,Num@0x9B0}
+                // element = FTransform, 0x30 bytes: FQuat16 + Translation12 + Scale12
+                static const uint64_t kBoneOffs[] = { 0x9B8, 0x940, 0x9A8 };
                 uint32_t bn = 0;
                 uint64_t hit = 0;
-                for (uint64_t off = 0x858; off < 0x908; off += 8) {
-                    if (looks_transform_array(mesh, off, &bn)) { hit = off; break; }
-                }
-                if (!hit) for (uint64_t off = 0x9c8; off < 0xb20; off += 8) {
-                    if (looks_transform_array(mesh, off, &bn)) { hit = off; break; }
-                }
-                if (!hit) for (uint64_t off = 0x100; off < 0x1000; off += 8) {
-                    if (off >= 0x858 && off < 0x908) continue;
-                    if (off >= 0x9c8 && off < 0xb20) continue;
-                    if (looks_transform_array(mesh, off, &bn)) { hit = off; break; }
+                for (int bi = 0; bi < 3; bi++) {
+                    uint32_t n2 = lrd32(mesh + kBoneOffs[bi] + 8);
+                    uint64_t d2 = lrd64(mesh + kBoneOffs[bi]);
+                    if (ptr_ok(d2) && n2 >= 8 && n2 <= 1200) { hit = kBoneOffs[bi]; bn = n2; break; }
                 }
                 if (hit) {
                     boneFound++;
                     uint64_t bd = lrd64(mesh + hit);
                     uint8_t tf[0x30];
+                    memset(tf, 0, sizeof(tf));
                     lrd(bd, tf, sizeof(tf));
                     float* f = (float*)tf;
-                    L(@"[B] actor[%u] mesh=0x%llx(%s) boneOff=0x%llx Num=%u rootPos=(%.1f,%.1f,%.1f)",
-                      i, mesh, mc, hit, bn, f[4], f[5], f[6]);
+                    L(@"[B] actor[%u] mesh=0x%llx(%s) boneOff=0x%llx Num=%u bone0.quat=(%.2f,%.2f,%.2f,%.2f) bone0.pos=(%.1f,%.1f,%.1f)",
+                      i, mesh, mc, hit, bn, f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
+
+                    // verify ComponentToWorld candidate (0x270 unproven): a real C2W must be a
+                    // unit-quaternion FTransform with sane scale, and its translation should be
+                    // within world bounds. Scan a window and report all plausible candidates.
+                    for (uint64_t co = 0x200; co < 0x400; co += 0x10) {
+                        uint8_t ct[0x30];
+                        memset(ct, 0, sizeof(ct));
+                        if (!lrd(mesh + co, ct, sizeof(ct))) continue;
+                        float* g = (float*)ct;
+                        float qn = g[0]*g[0] + g[1]*g[1] + g[2]*g[2] + g[3]*g[3];
+                        if (!(qn > 0.9f && qn < 1.1f)) continue;
+                        if (!(g[12] > 0.01f && g[12] < 100 && g[13] > 0.01f && g[13] < 100 && g[14] > 0.01f && g[14] < 100)) continue;
+                        if (!(g[4] > -2000000 && g[4] < 2000000 && g[5] > -2000000 && g[5] < 2000000 && g[6] > -2000000 && g[6] < 2000000)) continue;
+                        if (g[4] == 0 && g[5] == 0 && g[6] == 0) continue;
+                        L(@"[C2W] mesh+0x%llx quat=(%.2f,%.2f,%.2f,%.2f) pos=(%.1f,%.1f,%.1f) scale=(%.2f,%.2f,%.2f)",
+                          co, g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[12], g[13], g[14]);
+                    }
                 } else if (withMesh <= 6) {
-                    L(@"[M] actor[%u] mesh=0x%llx(%s) no transform array", i, mesh, mc);
-                }
-                if (boneFound >= 6) break;
+                    L(@"[M] actor[%u] mesh=0x%llx(%s) none of 0x9B8/0x940/0x9A8 has a valid array", i, mesh, mc);
+                }                if (boneFound >= 6) break;
             }
             L(@"summary: actors=%u scanned=%u withMesh=%d boneArrays=%d", num, limit, withMesh, boneFound);
             L(@"=== done ===");

@@ -1,66 +1,104 @@
 // Offsets.hpp —— 版本相关的全部数字都在这一个文件里。
 //
-// ！！除标注 VERIFIED 的以外，以下全部为占位符，必须在目标二进制上实测后填入。
-// ！！禁止凭"别人写过的某某偏移"直接抄：UE4 每个小版本的类布局都会动，
-// ！！抄错的偏移表现为"实体数量 0 或 4 亿"，浪费的是整天的时间。
+// 目标：Arena Breakout iOS 1.0.249（com.proximabeta.mf.uamo）
+// 样本：UAGame_1.0.249_decrypted（arm64, cryptid=0, sha256 9D0295FE…7ABCAC7）
+// 引擎：UE 4.25–4.27（FField x42 / PhysX_3.4 / UnLua x43）
 //
-// 定位顺序（依据 ios-ue4-re 流程）：
-//   1. GNames / FNamePool 先从 dump 里白拿，用来按名字校验后面找到的东西
-//   2. GEngine 全局 -> GameViewportClient -> World（比裸 GWorld 全局可靠，
-//      ACE 保护的构建上裸 GWorld 常被换成解密/校验型访问器）
-//   3. 校验：PersistentLevel 的 Actors.Num 落在 几十~几百 之间才算对上
-//   4. 再读一个 actor 的坐标，坐标有限且量级合理才算真的进来了
+// 状态标记：
+//   VERIFIED-STATIC   —— 静态反编译 + 反射表证据（函数地址/指令片段可复现）
+//   VERIFIED-RUNTIME  —— 设备上实跑日志确认
+//   UNVERIFIED        —— 占位/推断，禁止直接上真机
+//
+// 证据详见工作区 offsets-report.md 与 gnames-report.md。
 
 #pragma once
 #include <stdint.h>
 
 namespace off {
 
-// ==================== 全局（.data 里的指针，运行时扫特征码定位） ====================
-// 特征码需在 arm64 slice 上用 IDA/Ghidra 自扫。这里是"待填"，不是值。
-extern uintptr_t GEngine;        // UNVERIFIED  UEngine*
-extern uintptr_t GNames;         // UNVERIFIED  FNamePool*（4.23+）
-extern uintptr_t GWorld;         // UNVERIFIED  UWorld*（受保护构建上可能是诱饵）
+// ==================== 全局（链接期地址，相对 0x100000000） ====================
+// 运行时地址 = 镜像基址 + (值 - 0x100000000)
+constexpr uintptr_t GEngine_VA = 0x10DBF9A58;  // VERIFIED-RUNTIME  1656 处引用；运行时读到真实 UEngine*
+constexpr uintptr_t GNames_VA  = 0x10D90D840;  // VERIFIED-STATIC   FNamePool **全局结构体本体**，不是指针
+constexpr uintptr_t GNames_BLOCKS_OFF = 0xD8;  // VERIFIED-STATIC   FNameEntryAllocator::Blocks[]
 
-// ==================== 引擎链 ====================
-constexpr uintptr_t UENGINE_GAMEVIEWPORT = 0x000;   // UNVERIFIED -> UGameViewportClient*
-constexpr uintptr_t UENGINE_GAMEINSTANCE  = 0x000;   // UNVERIFIED -> UGameInstance*
-constexpr uintptr_t GVC_WORLD             = 0x000;   // UNVERIFIED -> UWorld*
-constexpr uintptr_t GI_LOCALPLAYERS        = 0x000;  // UNVERIFIED -> TArray<ULocalPlayer*>
-constexpr uintptr_t GI_WORLD               = 0x000;  // UNVERIFIED -> UWorld*
+// ==================== FNameEntry 布局（VERIFIED-STATIC） ====================
+//   header = uint16 @ entry+0 ; bit0 = wide ; len = header >> 6 (10 bit)
+//   text   = entry+2
+//   id     = (block << 16) | (byteOffsetInBlock >> 1)
+constexpr uint32_t FNAME_LEN_SHIFT = 6;
+constexpr uint32_t FNAME_LEN_MASK  = 0x3FF;
 
-// ==================== UWorld ====================
-constexpr uintptr_t UWORLD_PERSISTENT_LEVEL = 0x000; // UNVERIFIED ULevel*
-constexpr uintptr_t UWORLD_OWNING_GAME_INSTANCE = 0x000; // UNVERIFIED
-constexpr uintptr_t UWORLD_GAME_STATE        = 0x000; // UNVERIFIED AGameStateBase*
+// ==================== 世界入口（两条路，优先第一条） ====================
+// ① UEngine::GetWorldFromContextObject（VERIFIED-STATIC）
+//    证据：UGameplayStatics::GetAllActorsOfClass 实现 0x104976644 里就是 adrp GEngine 后调用它
+//    用法：fn(engine, engine, 0) -> UWorld*
+constexpr uintptr_t UENGINE_GET_WORLD_FN = 0x104CB57B8;
+// ② 兜底：UEngine::GameViewport（VERIFIED-STATIC，运行时候选字段里存在 +0x788）
+constexpr uintptr_t UENGINE_GAMEVIEWPORT = 0x788;
+// 注意：FWorldContext 里也有 GameViewport 在 +0x210，别混用
 
-// ==================== ULevel ====================
-constexpr uintptr_t ULEVEL_ACTORS = 0x000;           // UNVERIFIED TArray<AActor*>
+// ==================== UWorld（VERIFIED-STATIC） ====================
+constexpr uintptr_t UWORLD_PERSISTENT_LEVEL   = 0x30;   // ULevel*
+constexpr uintptr_t UWORLD_GAME_STATE         = 0x120;  // AGameStateBase*
+constexpr uintptr_t UWORLD_LEVELS             = 0x138;  // TArray<ULevel*>
+constexpr uintptr_t UWORLD_LEVEL_COLLECTIONS  = 0x148;
+constexpr uintptr_t UWORLD_OWNING_GAME_INSTANCE = 0x180;
 
-// ==================== AActor / 角色 ====================
-constexpr uintptr_t ACTOR_ROOT_COMPONENT = 0x000;    // UNVERIFIED USceneComponent*
-constexpr uintptr_t ACTOR_OWNER          = 0x000;    // UNVERIFIED
-constexpr uintptr_t ACTOR_INSTIGATOR     = 0x000;    // UNVERIFIED APawn*/AController*
-constexpr uintptr_t SCENE_RELATIVE_LOC   = 0x000;    // UNVERIFIED FVector（相对父组件）
-constexpr uintptr_t SCENE_COMPONENT_TO_WORLD = 0x000;// UNVERIFIED FTransform（组件->世界）
-constexpr uintptr_t PAWN_PLAYER_STATE    = 0x000;    // UNVERIFIED
-constexpr uintptr_t PSC_PAWN_PRIVATE     = 0x000;    // UNVERIFIED
-constexpr uintptr_t PSC_TEAM_ID          = 0x000;    // UNVERIFIED uint8
-constexpr uintptr_t PSC_HEALTH           = 0x000;    // UNVERIFIED float（位置随版本/字段布局变）
+// ==================== ULevel（VERIFIED-STATIC，medium） ====================
+// Actors 未进反射表，靠"ULevel 属性数组 [0] 是 OwningWorld@0xb8 ⇒ 0x28..0xb8 为未反射区"推断
+constexpr uintptr_t ULEVEL_ACTORS     = 0x28;   // TArray<AActor*>
+constexpr uintptr_t ULEVEL_OWNING_WORLD = 0xB8;
+constexpr uintptr_t ULEVEL_MODEL        = 0xC0;
+constexpr uintptr_t ULEVEL_LEVEL_SCRIPT_ACTOR = 0xE8;
 
-// ==================== 骨骼 / 网格 ====================
-constexpr uintptr_t CHAR_MESH            = 0x000;    // UNVERIFIED USkeletalMeshComponent*
-constexpr uintptr_t SKEL_BONE_ARRAY      = 0x000;    // UNVERIFIED TArray<FTransform>（ComponentSpace）
-constexpr uintptr_t SKEL_COMPONENT_TO_WORLD = 0x000;// UNVERIFIED FTransform
-// UE4 ComponentSpace 是 3x4（FTransform 的 48 字节布局：R[3][4] + T[4]），索引 boneIndex*0x30
+// ==================== UObject 公共头（VERIFIED-RUNTIME） ====================
+constexpr uintptr_t UOBJECT_CLASS_PRIVATE = 0x10;  // UClass*
+constexpr uintptr_t UOBJECT_NAME_PRIVATE  = 0x18;  // FName（uint32 索引）
+constexpr uintptr_t UOBJECT_OUTER_PRIVATE = 0x20;
 
-// ==================== 相机 ====================
-constexpr uintptr_t PC_PLAYER_CAMERA_MANAGER = 0x000; // UNVERIFIED APlayerCameraManager*
-constexpr uintptr_t PCM_CAMERA_CACHE         = 0x000; // UNVERIFIED FCameraCacheEntry{POV}
-constexpr uintptr_t PCAM_CONTROL_ROTATION    = 0x000; // UNVERIFIED FRotator（自瞄写这里）
+// ==================== ACharacter（VERIFIED-STATIC） ====================
+constexpr uintptr_t CHAR_MESH               = 0x418;  // USkeletalMeshComponent*
+constexpr uintptr_t CHAR_CHARACTER_MOVEMENT = 0x420;
+constexpr uintptr_t CHAR_CAPSULE_COMPONENT  = 0x428;
 
-// ==================== FMinimalViewInfo 字段 ====================
-// 这几个是 UE4 公开源码里的字段顺序，可以信任；偏移随版本累积填充变化，仍需核对。
+// ==================== USkeletalMeshComponent / USkinnedMeshComponent（VERIFIED-STATIC） ====================
+// FTransform = 0x30 字节：FQuat@0x00(16) + Translation@0x10(12) + Scale3D@0x1C(12)
+constexpr uintptr_t SKEL_XFORM_SIZE      = 0x30;
+constexpr uintptr_t SKEL_BONE_ARRAY      = 0x9B8;  // CachedComponentSpaceTransforms (TArray<FTransform>)
+constexpr uintptr_t SKEL_BONE_NUM        = 0x9C0;
+constexpr uintptr_t SKEL_BONE_MAX        = 0x9C4;
+constexpr uintptr_t BONE_LOCAL_ARRAY     = 0x940;  // BoneSpaceTransforms（活数组）
+constexpr uintptr_t BONE_LOCAL_NUM       = 0x948;
+constexpr uintptr_t SKEL_CACHED_BONE_SPACE = 0x9A8;
+constexpr uintptr_t SKEL_SPACEBASES_BASE = 0x700;  // TArray<TArray<FTransform>> 多缓冲
+constexpr uintptr_t SKEL_SPACEBASES_IDX  = 0x740;
+constexpr uintptr_t SKEL_SKELETALMESH    = 0x6D0;  // USkeletalMesh*
+constexpr uintptr_t SKEL_MASTER_POSE     = 0x6D8;
+constexpr uintptr_t SKEL_MESH_OBJECT     = 0x860;
+constexpr uintptr_t REFSKEL_BONEINFO_NUM = 0x1E8;  // 资产骨数（GetNumBones 读这里）
+constexpr uintptr_t REFSKEL_REFBONEPOSE  = 0x1F0;
+constexpr uintptr_t REFSKEL_REFBONEPOSE_NUM = 0x1F8;
+
+// 组件→世界变换：候选 0x270（布局推断：AttachParent@0x240 / AttachSocketName@0x248 /
+// AttachChildren@0x250 / ClientAttachedChildren@0x260 之后第一个 16 字节对齐位）
+// 运行时用"四元数模长≈1 + Scale∈(0.01,100) + 平移在合理范围"扫描确认，未确认前不改这里
+constexpr uintptr_t SKEL_COMPONENT_TO_WORLD = 0x270;  // UNVERIFIED
+
+// 世界坐标公式（UE4 行向量约定，先骨后组件）：
+//   world = BoneCS.ToMatrixWithScale() * ComponentToWorld.ToMatrixWithScale()
+//   只要位置： CW.TransformPosition(BoneCS.Translation)，Translation 在元素 +0x10
+
+// ==================== AActor / 组件 ====================
+constexpr uintptr_t ACTOR_ROOT_COMPONENT = 0x000;  // UNVERIFIED USceneComponent*
+constexpr uintptr_t ACTOR_OWNER          = 0x000;  // UNVERIFIED
+
+// ==================== 相机（未定位） ====================
+constexpr uintptr_t PC_PLAYER_CAMERA_MANAGER = 0x000;  // UNVERIFIED
+constexpr uintptr_t PCM_CAMERA_CACHE         = 0x000;  // UNVERIFIED
+constexpr uintptr_t PCAM_CONTROL_ROTATION    = 0x000;  // UNVERIFIED
+
+// ==================== FMinimalViewInfo（UE4 公开字段顺序，仍需核对） ====================
 constexpr uintptr_t POV_LOCATION   = 0x00;   // FVector
 constexpr uintptr_t POV_ROTATION   = 0x0C;   // FRotator (Pitch, Yaw, Roll)
 constexpr uintptr_t POV_FOV        = 0x18;   // float

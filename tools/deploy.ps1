@@ -28,9 +28,9 @@ param(
     [string]$Token,
     [string]$RepoName = "ar-ios",
     [string]$Owner,
-    [int]$TimeoutMinutes = 40,
+    [int]$TimeoutMinutes = 45,
     [switch]$NoBuild,
-    [switch]$KeepPublic
+    [switch]$Private
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,9 +57,9 @@ function Api([string]$method, [string]$uri, $bodyObj = $null) {
             if ($bodyObj -ne $null) {
                 $json = $bodyObj | ConvertTo-Json -Depth 8
                 return Invoke-RestMethod -Uri $uri -Headers $hdr -Method $method `
-                       -Body ([Text.Encoding]::UTF8.GetBytes($json))
+                       -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec 60
             }
-            return Invoke-RestMethod -Uri $uri -Headers $hdr -Method $method
+            return Invoke-RestMethod -Uri $uri -Headers $hdr -Method $method -TimeoutSec 60
         } catch {
             $code = 0
             if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
@@ -88,10 +88,13 @@ $headSha = $ref.object.sha
 $headCommit = Api 'Get' "$base/git/commits/$headSha"
 
 $entries = @()
+$n = 0
 foreach ($f in $files) {
+    $n++
     $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($f.Full))
     $blob = Api 'Post' "$base/git/blobs" @{ content = $b64; encoding = 'base64' }
     $entries += @{ path = $f.Rel; mode = '100644'; type = 'blob'; sha = $blob.sha }
+    if ($n % 25 -eq 0 -or $n -eq $files.Count) { "  uploaded $n/$($files.Count)" }
 }
 $tree = Api 'Post' "$base/git/trees" @{ base_tree = $headCommit.tree.sha; tree = $entries }
 $nc = Api 'Post' "$base/git/commits" @{ message = $Message; tree = $tree.sha; parents = @($headSha) }
@@ -104,7 +107,7 @@ $run = $null
 $restored = $false
 function Restore-Private {
     if ($script:restored) { return }
-    if ($KeepPublic) { "repo left PUBLIC (-KeepPublic)"; $script:restored = $true; return }
+    if (-not $Private) { "repo left PUBLIC (pass -Private to flip it back)"; $script:restored = $true; return }
     try {
         $null = Api 'Patch' $base @{ private = $true }
         "repo restored private"
@@ -144,9 +147,10 @@ try {
     }
 
     if (-not $run -or $run.status -ne 'completed') {
-        "runner queue timeout: repo kept PUBLIC so the queued run can still start."
-        "re-run this script later with -NoBuild:$false to just fetch, or wait and download manually."
-        Restore-Private
+        "runner queue timeout after $TimeoutMinutes min."
+        "repo is LEFT PUBLIC on purpose: a queued job is cancelled instantly if the repo turns private."
+        "wait a few minutes, then download the artifact from the run page, or re-run this script."
+        $script:restored = $true
         return
     }
 
