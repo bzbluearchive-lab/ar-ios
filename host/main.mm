@@ -266,7 +266,30 @@ static void ARExportLog(void) {
     printf("=== 导出结束（在上面成功的路径里找 ar_full_log.txt）===\n");
 }
 
+
+// ---------------------------------------------------------------------------
+// 自注入自测：把 payload 映射进**本进程**并尝试执行。
+//   - 本进程内成功 -> 注入实现没问题，游戏里的失败是目标环境差异
+//   - 本进程内也失败 -> 是注入实现的 bug，可以本地反复调，不用牺牲游戏
+// ---------------------------------------------------------------------------
+static void ARSelfTest(void) {
+    printf("\n=== 自注入自测（目标 = 本进程 %d）===\n", getpid());
+
+    NSString* dylib = [[NSBundle mainBundle] pathForResource:@"ARPayloadManual" ofType:@"dylib"];
+    if (!dylib) { printf("[self] 包里找不到 payload\n"); return; }
+    printf("[self] payload=%s\n", dylib.UTF8String);
+
+    mach_port_t task = mach_task_self();
+    int susp = -1;
+    bool running = mload::target_is_running(task, &susp);
+    printf("[self] running=%d suspend_count=%d\n", running, susp);
+
+    mload::map_and_call(task, dylib.UTF8String, "arp_probe", nullptr, false);
+    printf("=== 自注入自测结束 ===\n");
+}
+
 static void ARDumpBreadcrumbs(void);
+
 
 static void ARInjectSpringBoard(const char* kw) {
     NSString* pp = payloadPath();
@@ -400,6 +423,14 @@ static void ARInjectSpringBoard(const char* kw) {
     [exp addTarget:self action:@selector(onExport) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:exp];
     [self.view addSubview:man];
+
+    // 自注入自测：把 payload 打进本进程，验证执行链路（不碰游戏）
+    UIButton* self = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.frame = CGRectMake(pad, 432, w - pad*2, 40);
+    [self setTitle:@"自注入自测（打本进程）" forState:UIControlStateNormal];
+    [self addTarget:self action:@selector(onSelfTest) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self];
+
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
     scan.frame = CGRectMake(pad*2 + (w - pad*3)/2, 190, (w - pad*3)/2, 48);
@@ -416,7 +447,7 @@ static void ARInjectSpringBoard(const char* kw) {
     self.keyword.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
     [self.view addSubview:self.keyword];
 
-    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 434, w - pad*2, self.view.bounds.size.height - 454)];
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 478, w - pad*2, self.view.bounds.size.height - 498)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     [self.view addSubview:self.logView];
