@@ -152,6 +152,83 @@ inline bool probe_execution(mach_port_t task, uintptr_t fn, int samples = 20, in
     vm_deallocate(mach_task_self(), (vm_address_t)list, count * sizeof(thread_t));
     return ok;
 }
+
+// 短窗口劫持：借一个非主线程，把 PC 指到 fn，只冻结 holdMs 毫秒就还原。
+//
+// 为什么必须"短"：冻结游戏线程会让它卡住，时间长了系统 watchdog 直接杀进程
+// （实测 280ms 以上就危险）。而写几个内存值只需要几微秒，
+// 所以 20~30ms 足够让目标代码跑完，同时不会让游戏卡死。
+//
+// 不再用"PC 有没有离开函数范围"判断成功与否 —— 那套判据对自循环代码永远失效。
+// 成败由调用方读结果槽决定。
+inline bool hijack_quick(mach_port_t task, uintptr_t fn, uint64_t x0,
+                         int holdMs = 25, int maxTries = 4, uint64_t* triedOut = nullptr) {
+    if (!task || !fn) return false;
+
+    thread_act_array_t list = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(task, &list, &count) != KERN_SUCCESS || !list) return false;
+
+    uintptr_t stack = alloc_stack(task, 0x8000);
+    if (!stack) {
+        for (mach_msg_type_number_t i = 0; i < count; i++) mach_port_deallocate(mach_task_self(), list[i]);
+        vm_deallocate(mach_task_self(), (vm_address_t)list, count * sizeof(thread_t));
+        return false;
+    }
+    uint64_t stackTop = (uint64_t)((stack + 0x8000) & ~0xFULL);
+
+    // 从末尾往前挑（第 0 个通常是主线程）
+    int floorIdx = (count > 1) ? 1 : 0;
+    int tried = 0;
+    bool ok = false;
+
+    for (int idx = (int)count - 1; idx >= floorIdx && tried < maxTries; idx--) {
+        thread_t tid = list[idx];
+
+        arm_thread_state64_t sv;
+        mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(tid, ARM_THREAD_STATE64, (thread_state_t)&sv, &cnt) != KERN_SUCCESS) continue;
+        if (sv.__pc == 0) continue;
+
+        if (thread_suspend(tid) != KERN_SUCCESS) continue;
+
+        arm_thread_state64_t st = sv;
+        st.__pc = (uint64_t)fn;
+        st.__sp = stackTop;
+        st.__lr = 0;
+        st.__x[0] = x0;
+
+        kern_return_t w = thread_set_state(tid, ARM_THREAD_STATE64,
+                                           (thread_state_t)&st, ARM_THREAD_STATE64_COUNT);
+        if (w != KERN_SUCCESS) { thread_resume(tid); continue; }
+
+        thread_resume(tid);
+        tried++;
+        if (triedOut) *triedOut = (uint64_t)tried;
+
+        // 只放它跑 holdMs 毫秒
+        usleep(holdMs * 1000);
+
+        thread_suspend(tid);
+        kern_return_t r = thread_set_state(tid, ARM_THREAD_STATE64,
+                                           (thread_state_t)&sv, ARM_THREAD_STATE64_COUNT);
+        if (r != KERN_SUCCESS) {
+            usleep(3000);
+            r = thread_set_state(tid, ARM_THREAD_STATE64,
+                                 (thread_state_t)&sv, ARM_THREAD_STATE64_COUNT);
+        }
+        thread_resume(tid);
+        printf("[hijack] 短劫持 tid=%d 冻结 %d ms 还原->%d\n", idx, holdMs, r);
+        ok = (r == KERN_SUCCESS);
+        if (ok) break;
+    }
+
+    for (mach_msg_type_number_t i = 0; i < count; i++) mach_port_deallocate(mach_task_self(), list[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)list, count * sizeof(thread_t));
+    printf("[hijack] 短劫持结束: tried=%d ok=%d\n", tried, ok);
+    return ok;
+}
+
 // 主流程：在目标里挑一个线程，暂停、改寄存器、恢复、等待、还原
 inline bool hijack_call(mach_port_t task, uintptr_t fn, uint64_t x0,
                         int timeoutMs = 600, int maxTries = 3, uint64_t x1 = 0) {
