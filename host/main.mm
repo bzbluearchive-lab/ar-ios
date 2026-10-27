@@ -284,7 +284,7 @@ static void ARSelfTest(void) {
     bool running = mload::target_is_running(task, &susp);
     printf("[self] running=%d suspend_count=%d\n", running, susp);
 
-    mload::map_and_call(task, dylib.UTF8String, "arp_probe", nullptr, false);
+    mload::map_and_call(task, dylib.UTF8String, "arp_probe", nullptr, false, 1);
     printf("=== 自注入自测结束 ===\n");
 }
 

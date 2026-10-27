@@ -140,6 +140,14 @@ for rel in FILES:
         WARN.append(f"[文案] {rel}: 可能有被换行截断的 printf 字符串")
 
 # ---------------- C. 逻辑不变量 ----------------
+# 日志必须无缓冲：闪退时块缓冲会丢掉全部现场
+host_src = read("host/main.mm")
+if host_src and "setvbuf" not in host_src:
+    FAIL.append("[诊断] host 未设置无缓冲 stdout，闪退时日志会丢失")
+dmn_src = read("daemon/main.mm")
+if dmn_src and "setvbuf" not in dmn_src:
+    FAIL.append("[诊断] daemon 未设置无缓冲 stdout")
+
 ml = read("src/Inject/ManualLoad.h")
 if ml:
     if "target_is_running" not in ml:
@@ -152,8 +160,8 @@ if ml:
         FAIL.append("[逻辑] resolve_sym 未过滤未定义符号（会把全局变量解析成偏移 0）")
     if "hijack_quick" not in ml:
         FAIL.append("[逻辑] 入口未使用短窗口劫持")
-    if re.search(r'call_addr\(task,\s*entry', ml):
-        FAIL.append("[逻辑] 入口仍在用 thread_create（已证明无法执行）")
+    if re.search(r'call_addr\(task,\s*entry', ml) and "execMode == 1" not in ml:
+        FAIL.append("[逻辑] 入口默认路径在用 thread_create（已证明无法执行）；只允许出现在自测分支")
     if "入口未执行" not in ml:
         FAIL.append("[逻辑] 入口未执行时必须返回 0，否则 daemon 会误判成功并停止重试")
     if "read_remote_slot" not in ml:

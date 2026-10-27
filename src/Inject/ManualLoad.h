@@ -321,7 +321,10 @@ inline bool target_is_running(mach_port_t task, int* suspendOut = nullptr) {
 }
 
 // ---------------- 主流程：把 dylib 手动映射进目标并调用入口 ----------------
-inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const char* entrySym, const char* notePath = nullptr, bool hijackEntry = false) {
+// execMode: 0 = 短窗口劫持已有线程；1 = 只用 thread_create（自测用，绝不动别人线程）
+inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const char* entrySym,
+                              const char* notePath = nullptr, bool hijackEntry = false,
+                              int execMode = 0) {
     int susp = 0;
     if (!target_is_running(task, &susp)) {
         printf("[mload] 目标不可执行: suspend_count=%d -> 本次放弃注入（等它回到前台）\n", susp);
@@ -537,7 +540,20 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
             // 既能让代码跑完，又不会让游戏卡到被 watchdog 杀掉。
             long probeVals[5] = {0, 0, 0, 0, 0};
             bool ranOk = false;
-            for (int attempt = 0; attempt < 2 && !ranOk; attempt++) {
+
+            if (execMode == 1) {
+                // 自测模式：只新建线程，绝不碰任何已有线程
+                printf("[mload] 执行模式=thread_create（不劫持任何已有线程）\n");
+                call_addr(task, entry, stackTop, (uint64_t)slot, tls);
+                usleep(300 * 1000);
+                if (slot && read_remote_slot(task, slot, probeVals) && probeVals[0] != 0) {
+                    ranOk = true;
+                    entryRan = true;
+                    printf("[mload] thread_create 模式：结果槽有值 -> 代码已执行\n");
+                } else {
+                    printf("[mload] thread_create 模式：结果槽为空 -> 新建线程没有执行代码\n");
+                }
+            } else for (int attempt = 0; attempt < 2 && !ranOk; attempt++) {
                 hijack::hijack_quick(task, entry, (uint64_t)slot, 60, 3);
                 usleep(150 * 1000);
                 if (slot && read_remote_slot(task, slot, probeVals) && probeVals[0] != 0) {
@@ -549,7 +565,7 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
                 }
             }
             if (!ranOk) {
-                printf("[mload] 短劫持未能让入口执行（不再回退新建线程：已验证不执行）\n");
+                printf("[mload] 入口未执行成功（当前模式=%s）\n", execMode == 1 ? "thread_create" : "短窗口劫持");
             }
         } else {
             printf("[mload] 跳过入口调用（自旋探针未通过）\n");
