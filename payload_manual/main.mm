@@ -109,6 +109,20 @@ static void buildOverlay(const char* notePath) {
     }
 }
 
+
+// 最小入口：只做裸 syscall 面包屑，然后自旋。
+//   - 不碰 ObjC、不碰 bind、不碰 TLS
+//   - 用来单独回答一个问题：从"手动映射进来的匿名可执行页"里
+//     直接 svc #0x80 能不能成功？
+//   能写出 note_ok 就说明整条执行链（映射→执行→进内核）都通，
+//   剩下的问题只会在 ObjC 层。
+extern "C" __attribute__((visibility("default")))
+void arp_note(const char* notePath) {
+    rawNote(notePath, "note_ok\n");
+    volatile unsigned long n = 0;
+    for (;;) { n++; }
+}
+
 // 纯自旋：不调用任何外部函数，用来验证"映射进来的代码能否被执行"
 extern "C" __attribute__((visibility("default")))
 void arp_spin(void) {

@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
                     if (containercopy::data_container_of("com.proximabeta.mf.uamo", container, sizeof(container)))
                         snprintf(note, sizeof(note), "%s/tmp/ar_manual_probe.txt", container);
                     L("面包屑路径=%s", note[0] ? note : "(none)");
-                    uintptr_t rb = mload::map_and_call(task, payload, "arp_entry", note[0] ? note : nullptr, true);
+                    uintptr_t rb = mload::map_and_call(task, payload, "arp_note", note[0] ? note : nullptr, true);
                     mach_port_deallocate(mach_task_self(), task);
                     L("手动映射完成 base=0x%llx", (unsigned long long)rb);
                 } else {
