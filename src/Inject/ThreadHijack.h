@@ -102,7 +102,8 @@ inline bool probe_execution(mach_port_t task, uintptr_t fn, int samples = 20, in
     uint64_t stackTop = (uint64_t)((stack + 0x10000) & ~0xFULL);
 
     bool ok = false;
-    for (mach_msg_type_number_t i = 0; i < count && !ok; i++) {
+    // 同样跳过主线程：探针会自旋，占住主线程会被 watchdog 干掉
+    for (mach_msg_type_number_t i = (count > 1 ? 1 : 0); i < count && !ok; i++) {
         arm_thread_state64_t sv;
         mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
         if (thread_get_state(list[i], ARM_THREAD_STATE64, (thread_state_t)&sv, &cnt) != KERN_SUCCESS) continue;
@@ -172,7 +173,9 @@ inline bool hijack_call(mach_port_t task, uintptr_t fn, uint64_t x0,
     bool done = false;
     int tried = 0;
 
-    for (mach_msg_type_number_t i = 0; i < count && !done && tried < maxTries; i++) {
+    // 从 i=1 开始：task_threads 的第 0 个通常是主线程，
+    // 劫持主线程等于堵死目标的 run loop，watchdog 会立刻杀掉进程。
+    for (mach_msg_type_number_t i = (count > 1 ? 1 : 0); i < count && !done && tried < maxTries; i++) {
         SavedThread sv;
         sv.tid = list[i];
 
