@@ -49,6 +49,10 @@ ent build/ents/P2.plist platform-application com.apple.private.security.no-sandb
 ent build/ents/P3.plist platform-application com.apple.private.cs.debugger
 ent build/ents/P4.plist platform-application task_for_pid-allow com.apple.system-task-ports get-task-allow
 ent build/ents/P2b.plist platform-application com.apple.private.security.no-sandbox task_for_pid-allow com.apple.system-task-ports get-task-allow
+# P2c：在「能启动、能 task_for_pid」的 P2b 基础上，追加允许创建可执行内存的特权。
+# 目的：验证 iOS 的 JIT 限制能否被 entitlement 打开（TrollStore 可授予任意 entitlement）。
+ent build/ents/P2c.plist platform-application com.apple.private.security.no-sandbox task_for_pid-allow com.apple.system-task-ports get-task-allow \
+                        dynamic-codesigning com.apple.private.cs.dynamic-codesigning run-unsigned-code com.apple.private.amfi.can-execute-cdhash
 ent build/ents/K2.plist task_for_pid-allow com.apple.system-task-ports get-task-allow \
                         com.apple.private.skip-library-validation run-unsigned-code
 
@@ -87,7 +91,7 @@ build_variant() {
 }
 
 # P2b = 无沙盒 + 拿 task port 的权限（这两组各自都验证过不崩）
-build_variant G54 com.local.arg54 "AR G54" build/ents/P2b.plist ARHost-G54.ipa
+build_variant G55 com.local.arg55 "AR G55" build/ents/P2c.plist ARHost-G55.ipa
 
 
 echo

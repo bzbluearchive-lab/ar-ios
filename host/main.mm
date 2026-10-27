@@ -9,6 +9,8 @@
 
 #import <UIKit/UIKit.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/mman.h>
 #include <sys/utsname.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -417,6 +419,52 @@ static void ARSelfTestFileMap(void) {
     printf("=== 自测D 结束 ===\n");
 }
 
+
+// ---------------------------------------------------------------------------
+// 自测E：JIT 能力探测（最短路径）
+//
+// 直接回答：本进程能否创建可执行内存并跳进去执行？
+//   1. 分配一页 RW
+//   2. 写入 8 字节 ARM64：movz w0,#0x1234 ; ret
+//   3. mprotect 成 RX
+//   4. 当函数指针调用
+//
+// 返回 0x1234 = JIT 可用；进程被杀 = 系统禁止（与自测B 同因）；
+// mprotect 报错 = 内核直接拒绝。
+// ---------------------------------------------------------------------------
+static void ARSelfTestJIT(void) {
+    printf("\n=== 自测E：JIT 能力探测 ===\n");
+
+    size_t page = (size_t)getpagesize();
+    void* mem = mmap(nullptr, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) {
+        printf("[selfE] 分配失败: %s\n", strerror(errno));
+        return;
+    }
+    printf("[selfE] 已分配 RW 页 @ %p\n", mem);
+
+    uint32_t code[2] = { 0x52824680u, 0xd65f03c0u };   // movz w0,#0x1234 ; ret
+    memcpy(mem, code, sizeof(code));
+    printf("[selfE] 已写入 8 字节 ARM64 代码\n");
+
+    int rc = mprotect(mem, page, PROT_READ | PROT_EXEC);
+    printf("[selfE] mprotect(RX) -> %d %s\n", rc, rc != 0 ? strerror(errno) : "");
+    if (rc != 0) {
+        munmap(mem, page);
+        printf("[selfE] 结论: 内核拒绝创建可执行内存\n");
+        printf("=== 自测E 结束 ===\n");
+        return;
+    }
+
+    int (*fn)(void) = (int (*)(void))mem;
+    printf("[selfE] 即将跳入该页执行...\n");
+    fflush(stdout);
+    int r = fn();
+    printf("[selfE] 返回 0x%x (%s)\n", r, (r == 0x1234) ? "JIT 可用" : "返回值异常");
+    munmap(mem, page);
+    printf("=== 自测E 结束 ===\n");
+}
+
 static void ARDumpBreadcrumbs(void);
 
 
@@ -578,6 +626,12 @@ static void ARInjectSpringBoard(const char* kw) {
     [stBtn4 addTarget:self action:@selector(onSelfFileMap) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:stBtn4];
 
+    UIButton* stBtn5 = [UIButton buttonWithType:UIButtonTypeSystem];
+    stBtn5.frame = CGRectMake(pad, 540, w - pad*2, 36);
+    [stBtn5 setTitle:@"自测E：JIT 能力探测（可否执行新代码）" forState:UIControlStateNormal];
+    [stBtn5 addTarget:self action:@selector(onSelfJIT) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:stBtn5];
+
 
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -595,7 +649,7 @@ static void ARInjectSpringBoard(const char* kw) {
     self.keyword.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
     [self.view addSubview:self.keyword];
 
-    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 546, w - pad*2, self.view.bounds.size.height - 566)];
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 582, w - pad*2, self.view.bounds.size.height - 602)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     [self.view addSubview:self.logView];
@@ -765,6 +819,20 @@ static void ARScanOnly(const char* kw) {
                                                      encoding:NSUTF8StringEncoding error:nil];
             self.logView.text = log ?: @"(没有日志)";
             self.status.text = @"扫描完成，未注入";
+        });
+    });
+}
+
+- (void)onSelfJIT {
+    self.status.text = @"自测E：JIT 探测…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ARRedirectToLog();
+        ARSelfTestJIT();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
+                                                     encoding:NSUTF8StringEncoding error:nil];
+            self.logView.text = log ?: @"(没有日志)";
+            self.status.text = @"自测E结束";
         });
     });
 }
