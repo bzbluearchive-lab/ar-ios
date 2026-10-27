@@ -460,10 +460,10 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
             uint64_t tls = grab_tls_from_target(task);
             uintptr_t noteAddr = notePath ? write_string(task, notePath) : 0;
 
-            // 结果槽：payload 把每一步的执行结果写在这里，我们直接读回，
-            // 完全不依赖目标沙盒里的文件系统。
-            if (vm_allocate(task, &slot, 0x1000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) slot = 0;
-            printf("[mload] 结果槽=0x%llx\n", (unsigned long long)slot);
+            // 结果槽改用 payload 镜像里的全局符号 g_slot，
+            // 地址由符号表算出，不经过任何寄存器传参。
+            slot = resolve_sym(img, "g_slot");
+            printf("[mload] 结果槽(g_slot)=0x%llx\n", (unsigned long long)slot);
             if (noteAddr)
                 printf("[mload] 面包屑路径已写入目标: 0x%llx (%s)\n",
                        (unsigned long long)noteAddr, notePath);
@@ -471,12 +471,12 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
                    (unsigned long long)entry, (unsigned long long)noteAddr,
                    hijackEntry ? "劫持已有线程" : "新建线程");
             if (hijackEntry) {
-                if (!hijack::hijack_call(task, entry, (uint64_t)noteAddr, 900, 3, (uint64_t)slot)) {
+                if (!hijack::hijack_call(task, entry, (uint64_t)noteAddr, 900, 3, 0)) {
                     printf("[mload] 劫持失败，回退到新建线程\n");
                     call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls);
                 }
             } else {
-                call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls, (uint64_t)slot);
+                call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls, 0);
             }
         } else {
             printf("[mload] 跳过入口调用（自旋探针未通过）\n");
