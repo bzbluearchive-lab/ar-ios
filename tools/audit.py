@@ -131,6 +131,10 @@ for rel in FILES:
     if "libproc.h" in strip_strings_and_comments(src):
         FAIL.append(f"[平台] {rel}: 真的 include 了 libproc.h，iOS SDK 无此头")
 
+    # ObjC 方法体里 self 是既有标识符，声明同名局部变量必然编译失败
+    if rel.endswith(".mm") and re.search(r'^\s*\w+\s*\*?\s*self\s*=', src, re.M):
+        FAIL.append(f"[语法] {rel}: 用 self 当局部变量名（ObjC 里 self 已被占用）")
+
     # 日志里不能有未转义的裸换行出现在字符串内部（之前踩过）
     if re.search(r'printf\("[^"]*$', src, re.M):
         WARN.append(f"[文案] {rel}: 可能有被换行截断的 printf 字符串")

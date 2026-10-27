@@ -425,11 +425,11 @@ static void ARInjectSpringBoard(const char* kw) {
     [self.view addSubview:man];
 
     // 自注入自测：把 payload 打进本进程，验证执行链路（不碰游戏）
-    UIButton* self = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.frame = CGRectMake(pad, 432, w - pad*2, 40);
-    [self setTitle:@"自注入自测（打本进程）" forState:UIControlStateNormal];
-    [self addTarget:self action:@selector(onSelfTest) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self];
+    UIButton* stBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    stBtn.frame = CGRectMake(pad, 432, w - pad*2, 40);
+    [stBtn setTitle:@"自注入自测（打本进程）" forState:UIControlStateNormal];
+    [stBtn addTarget:self action:@selector(onSelfTest) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:stBtn];
 
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
