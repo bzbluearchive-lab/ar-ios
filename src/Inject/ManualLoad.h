@@ -496,7 +496,7 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
         // ---- 1) 先做安全的自旋探针：只验证"映射进来的代码能否被执行" ----
         //     arp_spin 不调用任何外部函数，所以它失败不会破坏目标；
         //     探针不过就绝不调用 arp_entry，避免为了解一个未知问题把游戏搞崩。
-        uintptr_t spin = resolve_sym(img, "arp_spin");
+        uintptr_t spin = 0;   // 暂时关掉自旋探针：它要冻结游戏线程，风险大于收益
         bool spinOk = false;
         if (spin) {
             printf("[mload] 自旋探针地址=0x%llx\n", (unsigned long long)spin);
