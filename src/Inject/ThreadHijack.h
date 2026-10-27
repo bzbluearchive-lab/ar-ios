@@ -154,7 +154,7 @@ inline bool probe_execution(mach_port_t task, uintptr_t fn, int samples = 20, in
 }
 // 主流程：在目标里挑一个线程，暂停、改寄存器、恢复、等待、还原
 inline bool hijack_call(mach_port_t task, uintptr_t fn, uint64_t x0,
-                        int timeoutMs = 600, int maxTries = 3) {
+                        int timeoutMs = 600, int maxTries = 3, uint64_t x1 = 0) {
     if (!task || !fn) return false;
 
     thread_act_array_t list = nullptr;
@@ -207,6 +207,7 @@ inline bool hijack_call(mach_port_t task, uintptr_t fn, uint64_t x0,
         st.__sp   = stackTop;
         st.__lr   = 0;
         st.__x[0] = x0;
+        st.__x[1] = x1;
         // x18 保留原值 —— 这正是劫持的意义
 
         kern_return_t w = thread_set_state(sv.tid, ARM_THREAD_STATE64,

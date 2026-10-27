@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
                     if (containercopy::data_container_of("com.proximabeta.mf.uamo", container, sizeof(container)))
                         snprintf(note, sizeof(note), "%s/tmp/ar_manual_probe.txt", container);
                     L("面包屑路径=%s", note[0] ? note : "(none)");
-                    uintptr_t rb = mload::map_and_call(task, payload, "arp_note", note[0] ? note : nullptr, true);
+                    uintptr_t rb = mload::map_and_call(task, payload, "arp_probe", note[0] ? note : nullptr, true);
                 // 注入后回读面包屑文件：让 daemon 日志自带"代码有没有跑起来"的结论，
                 // 不用再去翻 ar_full_log.txt。
                 sleep(2);

@@ -234,7 +234,7 @@ static inline uint64_t grab_tls_from_target(mach_port_t task) {
 }
 
 static inline kern_return_t call_addr(mach_port_t task, uintptr_t fn, uintptr_t stackTop,
-                                      uint64_t x0 = 0, uint64_t x18 = 0) {
+                                      uint64_t x0 = 0, uint64_t x18 = 0, uint64_t x1 = 0) {
     mach_port_t th = MACH_PORT_NULL;
     kern_return_t kr = thread_create(task, &th);
     if (kr != KERN_SUCCESS) { printf("[mload] thread_create -> %d\n", kr); return kr; }
@@ -245,6 +245,7 @@ static inline kern_return_t call_addr(mach_port_t task, uintptr_t fn, uintptr_t 
     st.__sp    = (uint64_t)(stackTop & ~0xFull);
     st.__lr    = 0;
     st.__x[0]  = x0;
+    st.__x[1]  = x1;
     st.__x[18] = x18;          // TLS
     kr = thread_set_state(th, ARM_THREAD_STATE64, (thread_state_t)&st,
                           ARM_THREAD_STATE64_COUNT);
@@ -279,6 +280,15 @@ inline uintptr_t resolve_sym(const Image& img, const char* name) {
         if (strcmp(nm, name) == 0) return img.remoteBase + nl[i].n_value;
     }
     return 0;
+}
+
+
+// 从目标内存读回结果槽（5 个 long）
+static inline bool read_remote_slot(mach_port_t task, uint64_t addr, long out[5]) {
+    vm_size_t got = 0;
+    if (vm_read_overwrite(task, (vm_address_t)addr, sizeof(long) * 5,
+                          (vm_address_t)out, &got) != KERN_SUCCESS) return false;
+    return got == sizeof(long) * 5;
 }
 
 // ---------------- 主流程：把 dylib 手动映射进目标并调用入口 ----------------
@@ -447,6 +457,12 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
         if (spinOk) {
             uint64_t tls = grab_tls_from_target(task);
             uintptr_t noteAddr = notePath ? write_string(task, notePath) : 0;
+
+            // 结果槽：payload 把每一步的执行结果写在这里，我们直接读回，
+            // 完全不依赖目标沙盒里的文件系统。
+            vm_address_t slot = 0;
+            if (vm_allocate(task, &slot, 0x1000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) slot = 0;
+            printf("[mload] 结果槽=0x%llx\n", (unsigned long long)slot);
             if (noteAddr)
                 printf("[mload] 面包屑路径已写入目标: 0x%llx (%s)\n",
                        (unsigned long long)noteAddr, notePath);
@@ -454,15 +470,33 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
                    (unsigned long long)entry, (unsigned long long)noteAddr,
                    hijackEntry ? "劫持已有线程" : "新建线程");
             if (hijackEntry) {
-                if (!hijack::hijack_call(task, entry, (uint64_t)noteAddr)) {
+                if (!hijack::hijack_call(task, entry, (uint64_t)noteAddr, 900, 3, (uint64_t)slot)) {
                     printf("[mload] 劫持失败，回退到新建线程\n");
                     call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls);
                 }
             } else {
-                call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls);
+                call_addr(task, entry, stackTop, (uint64_t)noteAddr, tls, (uint64_t)slot);
             }
         } else {
-            printf("[mload] 跳过 arp_entry 调用（自旋探针未通过）\n");
+            printf("[mload] 跳过入口调用（自旋探针未通过）\n");
+        }
+
+        // ---- 4) 回读结果槽：这是"代码有没有执行、open 有没有成功"的硬证据 ----
+        if (slot) {
+            long vals[5] = {0, 0, 0, 0, 0};
+            for (int i = 0; i < 8; i++) {
+                usleep(150 * 1000);
+                if (!read_remote_slot(task, slot, vals)) continue;
+                if (vals[0] != 0) break;
+            }
+            printf("[mload] 结果槽: entered=0x%lx open=%ld write=%ld done=0x%lx\n",
+                   vals[0], vals[1], vals[2], vals[3]);
+            if (vals[0] == 0) {
+                printf("[mload] 槽仍是空的 -> 入口代码根本没开始执行\n");
+            } else {
+                printf("[mload] 代码已执行；open 返回 %ld%s\n", vals[1],
+                       vals[1] < 0 ? "（失败：沙盒拒绝或路径不可写）" : "（成功）");
+            }
         }
     } else {
         printf("[mload] 没找到入口符号 %s（只跑了 init）\n", entrySym ? entrySym : "(null)");

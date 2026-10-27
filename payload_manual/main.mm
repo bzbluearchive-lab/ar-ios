@@ -123,6 +123,44 @@ void arp_note(const char* notePath) {
     for (;;) { n++; }
 }
 
+
+// 结果槽协议的魔数
+#define AR_MAGIC_ENTERED 0xC0FFEE11L
+#define AR_MAGIC_DONE    0xDEADBEEFL
+#define AR_MAGIC_OPENFAIL 0x0BAD0PENL
+
+// 核心观测入口：把每一步结果写进调用方（注入方）分配的内存槽，
+//   slot[0] = AR_MAGIC_ENTERED  -> 代码真的开始执行了
+//   slot[1] = open() 的返回值   -> 负数是错误码
+//   slot[2] = write() 的返回值
+//   slot[3] = AR_MAGIC_DONE     -> 全部走完
+//   slot[4] = 文件描述符用于 close 之后是否还有效（0 表示已关闭）
+// 这样完全不依赖沙盒里的文件系统，注入方 vm_read 就能看到结论。
+extern "C" __attribute__((visibility("default")))
+void arp_probe(const char* notePath, volatile long* slot) {
+    if (slot) slot[0] = AR_MAGIC_ENTERED;
+
+    long fd = -1;
+    if (notePath) {
+        fd = ar_sys3(5 /*open*/, (long)notePath, 0x209, 0644);
+    }
+    if (slot) slot[1] = fd;
+
+    long wr = -1;
+    if (fd >= 0) {
+        wr = ar_sys3(4 /*write*/, fd, (long)"ok\n", 3);
+        ar_sys3(6 /*close*/, fd, 0, 0);
+    }
+    if (slot) {
+        slot[2] = wr;
+        slot[3] = AR_MAGIC_DONE;
+        slot[4] = 0;
+    }
+
+    volatile unsigned long n = 0;
+    for (;;) { n++; }
+}
+
 // 纯自旋：不调用任何外部函数，用来验证"映射进来的代码能否被执行"
 extern "C" __attribute__((visibility("default")))
 void arp_spin(void) {
