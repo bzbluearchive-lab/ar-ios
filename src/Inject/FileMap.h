@@ -100,10 +100,12 @@ static inline bool map_into(mach_port_t task, const char* path, Mapped& out) {
 
     // 2) 变成可共享的 memory object，并要求可执行
     mach_port_t obj = MACH_PORT_NULL;
-    vm_size_t objSize = (vm_size_t)rounded;
+    // 注意类型：size 形参是 memory_object_size_t(64 位)，offset 是 memory_object_offset_t，
+    // 用 vm_size_t / vm_address_t 传入在 C++ 下会"no matching function"。
+    memory_object_size_t objSize = (memory_object_size_t)rounded;
     kern_return_t kr = mach_make_memory_entry_64(mach_task_self(),
                                                  &objSize,
-                                                 (vm_address_t)local,
+                                                 (memory_object_offset_t)(uintptr_t)local,
                                                  VM_PROT_READ | VM_PROT_EXECUTE,
                                                  &obj,
                                                  MACH_PORT_NULL);
