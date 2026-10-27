@@ -199,6 +199,16 @@ if pl:
     if "g_slot" in strip_strings_and_comments(pl):
         WARN.append("[风险] payload 仍使用全局变量（依赖 rebase，未修正时会写坏）")
 
+# ---------------- D. selector/方法一致性 ----------------
+# ObjC 的 addTarget:action:@selector(x) 写错名字编译不报错，点击时才崩（"unrecognized selector"）。
+src_h = read("host/main.mm")
+if src_h:
+    used = set(re.findall(r'@selector\(([A-Za-z0-9_]+)\)', src_h))
+    defined = set(re.findall(r'-\s*\(\s*[A-Za-z0-9_\s\*]+?\)\s*([A-Za-z0-9_]+)\s*[\{:]', src_h))
+    missing = sorted(x for x in used if x not in defined)
+    if missing:
+        FAIL.append("[语法] host/main.mm 里 selector 无实现（点击必崩）: " + ", ".join(missing))
+
 # ---------------- 输出 ----------------
 print("=" * 60)
 print(f"审查文件 {len(FILES)} 个")

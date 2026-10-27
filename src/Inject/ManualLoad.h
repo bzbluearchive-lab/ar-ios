@@ -236,7 +236,9 @@ static inline uint64_t grab_tls_from_target(mach_port_t task) {
 static inline kern_return_t call_addr(mach_port_t task, uintptr_t fn, uintptr_t stackTop,
                                       uint64_t x0 = 0, uint64_t x18 = 0, uint64_t x1 = 0) {
     mach_port_t th = MACH_PORT_NULL;
+    printf("[step] thread_create 前\n");
     kern_return_t kr = thread_create(task, &th);
+    printf("[step] thread_create -> %d\n", kr);
     if (kr != KERN_SUCCESS) { printf("[mload] thread_create -> %d\n", kr); return kr; }
 
     arm_thread_state64_t st;
@@ -247,9 +249,13 @@ static inline kern_return_t call_addr(mach_port_t task, uintptr_t fn, uintptr_t 
     st.__x[0]  = x0;
     st.__x[1]  = x1;
     st.__x[18] = x18;          // TLS
+    printf("[step] set_state 前 (pc=0x%llx sp=0x%llx)\n",
+           (unsigned long long)st.__pc, (unsigned long long)st.__sp);
     kr = thread_set_state(th, ARM_THREAD_STATE64, (thread_state_t)&st,
                           ARM_THREAD_STATE64_COUNT);
+    printf("[step] set_state -> %d\n", kr);
     if (kr == KERN_SUCCESS) kr = thread_resume(th);
+    printf("[step] resume -> %d\n", kr);
     if (kr != KERN_SUCCESS) printf("[mload] set_state/resume -> %d\n", kr);
     return kr;
 }
@@ -367,6 +373,7 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
            (unsigned long long)lo, (unsigned long long)hi, span);
 
     // 2) 目标里分配
+    printf("[step] before_vm_allocate\n");
     // 关键诊断：目标是否被挂起。挂起的进程线程不调度，
     // 之前很多次"劫持 entered=0 / 新建线程不执行"都是这个原因。
     {
@@ -420,9 +427,11 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
     printf("[mload] 已写入 %d 个段\n", wrote);
 
     // 4) 修重定位
+    printf("[step] before_fixups\n");
     if (!apply_fixups(img, task)) { printf("[mload] fixups 未全部成功\n"); }
 
     // 5) 设段权限
+    printf("[step] before_protect\n");
     p = img.file + sizeof(*mh);
     for (uint32_t i = 0; i < mh->ncmds; i++) {
         const struct load_command* lc = (const struct load_command*)p;
@@ -493,6 +502,7 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
             }
         }
     }
+    printf("[step] before_entry_block\n");
     vm_address_t slot = 0;   // payload 结果槽（作用域要覆盖整个入口流程）
     bool entryRan = false;   // 入口是否真的执行过（由结果槽判定）
 
@@ -541,7 +551,13 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
             long probeVals[5] = {0, 0, 0, 0, 0};
             bool ranOk = false;
 
-            if (execMode == 1) {
+            if (execMode == 2) {
+                // 只映射、不执行：验证镜像搬运与权限设置本身是否安全
+                printf("[mload] 执行模式=只映射（不做任何线程操作）\n");
+                printf("[mload] 映射完成，入口就绪 @ 0x%llx，未执行\n", (unsigned long long)entry);
+                ranOk = true;
+                entryRan = true;   // 映射成功即视为本次任务完成
+            } else if (execMode == 1) {
                 // 自测模式：只新建线程，绝不碰任何已有线程
                 printf("[mload] 执行模式=thread_create（不劫持任何已有线程）\n");
                 call_addr(task, entry, stackTop, (uint64_t)slot, tls);

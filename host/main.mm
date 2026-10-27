@@ -272,7 +272,7 @@ static void ARExportLog(void) {
 //   - 本进程内成功 -> 注入实现没问题，游戏里的失败是目标环境差异
 //   - 本进程内也失败 -> 是注入实现的 bug，可以本地反复调，不用牺牲游戏
 // ---------------------------------------------------------------------------
-static void ARSelfTest(void) {
+static void ARSelfTest(int mode) {
     printf("\n=== 自注入自测（目标 = 本进程 %d）===\n", getpid());
 
     NSString* dylib = [[NSBundle mainBundle] pathForResource:@"ARPayloadManual" ofType:@"dylib"];
@@ -284,8 +284,9 @@ static void ARSelfTest(void) {
     bool running = mload::target_is_running(task, &susp);
     printf("[self] running=%d suspend_count=%d\n", running, susp);
 
-    mload::map_and_call(task, dylib.UTF8String, "arp_probe", nullptr, false, 1);
-    printf("=== 自注入自测结束 ===\n");
+    printf("[self] mode=%d (%s)\n", mode, mode == 2 ? "只映射" : "映射+新建线程执行");
+    mload::map_and_call(task, dylib.UTF8String, "arp_probe", nullptr, false, mode);
+    printf("=== 自注入自测结束（%s）===\n", mode == 2 ? "只映射" : "映射+执行");
 }
 
 static void ARDumpBreadcrumbs(void);
@@ -426,10 +427,16 @@ static void ARInjectSpringBoard(const char* kw) {
 
     // 自注入自测：把 payload 打进本进程，验证执行链路（不碰游戏）
     UIButton* stBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    stBtn.frame = CGRectMake(pad, 432, w - pad*2, 40);
-    [stBtn setTitle:@"自注入自测（打本进程）" forState:UIControlStateNormal];
-    [stBtn addTarget:self action:@selector(onSelfTest) forControlEvents:UIControlEventTouchUpInside];
+    stBtn.frame = CGRectMake(pad, 428, (w - pad*3) / 2, 38);
+    [stBtn setTitle:@"自测A：只映射" forState:UIControlStateNormal];
+    [stBtn addTarget:self action:@selector(onSelfMapOnly) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:stBtn];
+
+    UIButton* stBtn2 = [UIButton buttonWithType:UIButtonTypeSystem];
+    stBtn2.frame = CGRectMake(pad*2 + (w - pad*3) / 2, 428, (w - pad*3) / 2, 38);
+    [stBtn2 setTitle:@"自测B：映射+执行" forState:UIControlStateNormal];
+    [stBtn2 addTarget:self action:@selector(onSelfExec) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:stBtn2];
 
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -621,7 +628,25 @@ static void ARScanOnly(const char* kw) {
     });
 }
 
+- (void)onSelfMapOnly { [self runSelfTest:2]; }
+- (void)onSelfExec    { [self runSelfTest:1]; }
+
+- (void)runSelfTest:(int)mode {
+    self.status.text = (mode == 2) ? @"自测A：只映射…" : @"自测B：映射+执行…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ARRedirectToLog();
+        ARSelfTest(mode);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
+                                                     encoding:NSUTF8StringEncoding error:nil];
+            self.logView.text = log ?: @"(没有日志)";
+            self.status.text = @"自测结束（若崩溃：重开本 app 后点导出日志）";
+        });
+    });
+}
+
 - (void)onExport {
+
     self.status.text = @"正在导出日志…";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         ARRedirectToLog();
