@@ -153,7 +153,7 @@ inline bool probe_execution(mach_port_t task, uintptr_t fn, int samples = 20, in
 }
 // 主流程：在目标里挑一个线程，暂停、改寄存器、恢复、等待、还原
 inline bool hijack_call(mach_port_t task, uintptr_t fn, uint64_t x0,
-                        int timeoutMs = 2000, int maxTries = 8) {
+                        int timeoutMs = 600, int maxTries = 3) {
     if (!task || !fn) return false;
 
     thread_act_array_t list = nullptr;
