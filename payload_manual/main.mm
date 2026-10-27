@@ -124,32 +124,25 @@ void arp_note(const char* notePath) {
 }
 
 
-// 结果槽放在 payload 镜像自己的 __DATA 里。
-// 注入方通过符号 g_slot 拿到它的地址再直接读，
-// 这样就完全不需要通过寄存器传指针 ——
-// 之前用 x1 传槽地址时，代码连第一个字节都没写，怀疑参数没进去。
+// 最小二分版本：只写内存，不做任何 syscall、不调用任何外部函数。
+// 目的：把"执行 + 写内存"和"进内核"两件事彻底分开。
+//   - 这个版本如果 slot 里有 magic 且进程存活 -> 执行与内存写没问题，
+//     之前的崩溃就是裸 syscall 造成的。
+//   - 如果这个版本也崩 -> 问题在更底层（栈/寄存器/执行页）。
 #define AR_MAGIC_ENTERED 0xC0FFEE11L
 #define AR_MAGIC_DONE    0xDEADBEEFL
 
 extern "C" __attribute__((visibility("default")))
-volatile long g_slot[8] = {0};   // 带初始化才是"定义"，否则链接期是 undefined
+volatile long g_slot[8] = {0};
 
 extern "C" __attribute__((visibility("default")))
 void arp_probe(const char* notePath) {
-    g_slot[0] = AR_MAGIC_ENTERED;      // 只要这行执行，槽里就有值
-
-    long fd = -1;
-    if (notePath) fd = ar_sys3(5 /*open*/, (long)notePath, 0x209, 0644);
-    g_slot[1] = fd;
-
-    if (fd >= 0) {
-        g_slot[2] = ar_sys3(4 /*write*/, fd, (long)"ok\n", 3);
-        ar_sys3(6 /*close*/, fd, 0, 0);
-    }
+    (void)notePath;
+    g_slot[0] = AR_MAGIC_ENTERED;   // 第一个写入：证明代码开始执行
+    g_slot[1] = 0x1111222233334444L;
     g_slot[3] = AR_MAGIC_DONE;
-
     volatile unsigned long n = 0;
-    for (;;) { n++; }
+    for (;;) { g_slot[2] = (long)(++n); }   // 持续写，便于外部观察它在跑
 }
 
 // 纯自旋：不调用任何外部函数，用来验证"映射进来的代码能否被执行"
