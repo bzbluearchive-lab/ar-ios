@@ -87,7 +87,7 @@ build_variant() {
 }
 
 # P2b = 无沙盒 + 拿 task port 的权限（这两组各自都验证过不崩）
-build_variant G29 com.local.arg29 "AR G29" build/ents/P2b.plist ARHost-G29.ipa
+build_variant G30 com.local.arg30 "AR G30" build/ents/P2b.plist ARHost-G30.ipa
 
 
 echo

@@ -1,36 +1,55 @@
 // payload_manual/main.mm —— 手动映射用的最小 payload
 //
-// 两条铁律（都是踩过的坑）：
+// 三条铁律（全部是踩过的坑）：
 //
-// 1) **不定义任何新的 ObjC 类**。手动映射绕过 dyld，也就绕过了 ObjC 的 image
-//    注册，我们自己定义的类不会进 runtime。所以只用系统已有的类。
+// 1) 不定义任何新的 ObjC 类：手动映射绕过了 dyld 的 image 注册，
+//    自己定义的类不会进 ObjC runtime。
 //
-// 2) **入口第一件事必须用原始 open/write 写面包屑**，不许碰 Foundation。
-//    arm64 上 x18 是 TLS 指针，注入线程的 x18 未必有效，
-//    而 @autoreleasepool / NSString 一上来就要访问 TLS —— 会直接 fault。
-//    先用纯 syscall 落盘，才能确认"代码到底有没有跑起来"。
+// 2) 面包屑必须用**裸系统调用**（svc #0x80），不经过任何外部符号。
+//    原因：我们手动映射时要自己解析 chained fixups 的 bind，
+//    这一步算错就会把 open/write 绑到错误的地址，一调用就崩。
+//    用 svc 直连内核就完全绕开这个不确定性 ——
+//    只要面包屑出现，就证明"代码能执行 + 能进内核"，
+//    剩下的失败就一定在 ObjC/bind 那一层。
 //
-// 面包屑路径由注入方通过 x0 传进来（那是目标自己容器里的路径，沙盒可写）。
+// 3) 入口绝不返回：返回会跳回 LR(=0) 导致目标进程崩溃。
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
-#include <fcntl.h>
 #include <unistd.h>
-#include <string.h>
 
-// ---------------- 第一层：纯 syscall，不碰 TLS ----------------
-static void rawNote(const char* path, const char* text) {
-    if (!path || !text) return;
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return;
-    size_t len = strlen(text);
-    ssize_t w = write(fd, text, len);
-    (void)w;
-    close(fd);
+// ---------------- Darwin arm64 裸系统调用 ----------------
+// svc #0x80，调用号放 x16，参数 x0..x2，返回值在 x0。
+// BSD 号：write=4, open=5, close=6
+static inline long ar_sys3(long n, long a, long b, long c) {
+    register long x16 __asm__("x16") = n;
+    register long x0  __asm__("x0")  = a;
+    register long x1  __asm__("x1")  = b;
+    register long x2  __asm__("x2")  = c;
+    __asm__ volatile("svc #0x80"
+                     : "+r"(x0)
+                     : "r"(x16), "r"(x1), "r"(x2)
+                     : "memory");
+    return x0;
 }
 
-// ---------------- 第二层：才用 ObjC ----------------
+static inline unsigned long ar_strlen(const char* s) {
+    unsigned long n = 0;
+    while (s && s[n]) n++;
+    return n;
+}
+
+// O_WRONLY(1) | O_CREAT(0x200) | O_APPEND(0x8) = 0x209
+static void rawNote(const char* path, const char* text) {
+    if (!path || !text) return;
+    long fd = ar_sys3(5 /*open*/, (long)path, 0x209, 0644);
+    if (fd < 0) return;
+    ar_sys3(4 /*write*/, fd, (long)text, (long)ar_strlen(text));
+    ar_sys3(6 /*close*/, fd, 0, 0);
+}
+
+// ---------------- 第二层：ObjC（这一层依赖 bind，可能是失败点） ----------------
 static id  msg0(id o, const char* sel)                        { return ((id(*)(id,SEL))objc_msgSend)(o, sel_registerName(sel)); }
 static id  msg1(id o, const char* sel, id a)                  { return ((id(*)(id,SEL,id))objc_msgSend)(o, sel_registerName(sel), a); }
 static void msgb(id o, const char* sel, BOOL a)               { ((void(*)(id,SEL,BOOL))objc_msgSend)(o, sel_registerName(sel), a); }
@@ -90,9 +109,7 @@ static void buildOverlay(const char* notePath) {
     }
 }
 
-// 纯自旋探针：不调用任何外部函数、不碰栈、不碰 TLS。
-// 用来判断"映射进去的代码到底能不能被执行"——如果这个都能跑，说明执行没问题，
-// 问题就出在后面的外部调用（bind 解析）上。
+// 纯自旋：不调用任何外部函数，用来验证"映射进来的代码能否被执行"
 extern "C" __attribute__((visibility("default")))
 void arp_spin(void) {
     volatile unsigned long n = 0;
@@ -102,8 +119,8 @@ void arp_spin(void) {
 // 注入方通过 x0 传入面包屑路径
 extern "C" __attribute__((visibility("default")))
 void arp_entry(const char* notePath) {
-    rawNote(notePath, "entry_raw_ok\n");     // 只要这行出现，就证明代码真跑了
+    rawNote(notePath, "entry_raw_ok\n");     // 裸 syscall：不依赖任何 bind
     buildOverlay(notePath);
     rawNote(notePath, "entry_done\n");
-    for (;;) sleep(3600);                    // 绝不返回：返回会跳回 LR(=0)
+    for (;;) sleep(3600);                    // 绝不返回
 }

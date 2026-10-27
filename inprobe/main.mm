@@ -42,7 +42,7 @@ static const uint64_t kOffGetWorld = 0x104cb57b8ULL;   // UEngine::GetWorldFromC
 
 static const uint32_t kOffEngineGameViewport = 0x788;
 static const uint32_t kOffWorldPersistentLevel = 0x30;
-static const uint32_t kOffLevelActors = 0x28;
+// ULevel::Actors is NOT 0x28 on this build; located by scanning at runtime.\n__attribute__((unused)) static const uint32_t kOffLevelActors = 0x28;
 static const uint32_t kOffCharacterMesh = 0x418;
 
 static const int kUdpPort = 45999;
@@ -170,6 +170,13 @@ static void inprobe_init(void) {
             NSString* docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
             NSString* modePath = [docs stringByAppendingPathComponent:@"probe_mode.txt"];
             NSString* mode = @"stealth";
+            if (![[NSFileManager defaultManager] fileExistsAtPath:modePath]) {
+                // first run: create it ourselves so the user never has to
+                [@"stealth" writeToFile:modePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                NSString* readme = [docs stringByAppendingPathComponent:@"inprobe_readme.txt"];
+                [@"inprobe modes:\n  noop    = do nothing (test whether injection itself is detected)\n  stealth = hide our image from dyld enumeration, then probe\nJust edit probe_mode.txt and relaunch.\n"
+                    writeToFile:readme atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            }
             if ([[NSFileManager defaultManager] fileExistsAtPath:modePath]) {
                 NSString* s = [NSString stringWithContentsOfFile:modePath encoding:NSUTF8StringEncoding error:nil];
                 if (s) {
@@ -201,6 +208,21 @@ static void inprobe_init(void) {
 
         L(@"=== inprobe v9 pid=%d base=0x%llx slide=0x%llx ===", getpid(), gBase, gBase - kStaticBase);
 
+        // ---- survival heartbeat: starts immediately, independent of probing ----
+        // Today ACE kills us near 60s. If the log keeps growing (t=600s+), the image
+        // hiding worked and we can move on to matches. This is the primary metric.
+        {
+            static int hbTick = 0;
+            dispatch_source_t hb = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+            dispatch_source_set_timer(hb, dispatch_time(DISPATCH_TIME_NOW, 15ull * NSEC_PER_SEC),
+                                      15ull * NSEC_PER_SEC, 5ull * NSEC_PER_SEC);
+            dispatch_source_set_event_handler(hb, ^{
+                hbTick++;
+                L(@"alive t=%ds", hbTick * 15);
+            });
+            dispatch_resume(hb);
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)),
                        dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             gNames  = gBase + (kOffGNames  - kStaticBase);

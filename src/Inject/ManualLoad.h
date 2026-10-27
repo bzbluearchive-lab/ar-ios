@@ -103,6 +103,12 @@ static inline bool apply_fixups(Image& img, mach_port_t task) {
 
     const struct dyld_chained_fixups_header* hdr =
         (const struct dyld_chained_fixups_header*)(img.file + fixupsFileOff);
+    printf("[mload] fixups 头: format=%u starts=%u imports=%u symbols=%u\n",
+           hdr->import_format, hdr->starts_offset, hdr->imports_offset, hdr->symbols_offset);
+    if (hdr->import_format != DYLD_CHAINED_IMPORT) {
+        printf("[mload] 警告: import_format=%u 不是 1(Ptr)，import 表步长可能不同\n",
+               hdr->import_format);
+    }
     const uint8_t* starts = img.file + fixupsFileOff + hdr->starts_offset;
     const struct dyld_chained_starts_in_image* si =
         (const struct dyld_chained_starts_in_image*)starts;
@@ -148,7 +154,9 @@ static inline bool apply_fixups(Image& img, mach_port_t task) {
                 const char* sym = symbols + impEntry->name_offset;
                 void* resolved = dlsym(RTLD_DEFAULT, sym);
                 if (!resolved && sym[0] == '_') resolved = dlsym(RTLD_DEFAULT, sym + 1);
-                if (!resolved) printf("[mload]   bind 未解析 %s\n", sym);
+                printf("[mload]   bind[%u] %-28s -> 0x%llx%s\n",
+                       bd.ordinal, sym, (unsigned long long)(uintptr_t)resolved,
+                       resolved ? "" : "   << 未解析！");
                 uint64_t value = (uint64_t)(uintptr_t)resolved + bd.addend;
                 if (!remote_write(task, slotAddr, &value, 8)) nFail++; else nBind++;
                 next = bd.next;
