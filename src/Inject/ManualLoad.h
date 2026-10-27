@@ -527,16 +527,27 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
             if (noteAddr)
                 printf("[mload] 面包屑路径已写入目标: 0x%llx (%s)\n",
                        (unsigned long long)noteAddr, notePath);
-            printf("[mload] 调用入口 %s @ 0x%llx (x0=0x%llx) 方式=%s\n", entrySym,
-                   (unsigned long long)entry, (unsigned long long)noteAddr,
-                   hijackEntry ? "劫持已有线程" : "新建线程");
-            if (hijackEntry) {
-                if (!hijack::hijack_call(task, entry, (uint64_t)slot, 900, 3, 0)) {
-                    printf("[mload] 劫持失败，回退到新建线程\n");
-                    call_addr(task, entry, stackTop, (uint64_t)slot, tls);
+            printf("[mload] 调用入口 %s @ 0x%llx (x0=槽 0x%llx) 方式=%s\n", entrySym,
+                   (unsigned long long)entry, (unsigned long long)slot,
+                   hijackEntry ? "短窗口劫持(25ms)" : "新建线程");
+
+            // 短窗口劫持：每次只冻结一个游戏线程 25ms。
+            // 每试一次就读结果槽，有值就停 —— 平均冻结时间最短，
+            // 既能让代码跑完，又不会让游戏卡到被 watchdog 杀掉。
+            long probeVals[5] = {0, 0, 0, 0, 0};
+            bool ranOk = false;
+            for (int attempt = 0; attempt < 3 && !ranOk; attempt++) {
+                hijack::hijack_quick(task, entry, (uint64_t)slot, 25, 1);
+                usleep(150 * 1000);
+                if (slot && read_remote_slot(task, slot, probeVals) && probeVals[0] != 0) {
+                    ranOk = true;
+                    printf("[mload] 第 %d 次短劫持后结果槽有值 -> 代码已执行\n", attempt + 1);
+                } else {
+                    printf("[mload] 第 %d 次短劫持后结果槽仍为空\n", attempt + 1);
                 }
-            } else {
-                call_addr(task, entry, stackTop, (uint64_t)slot, tls, 0);
+            }
+            if (!ranOk) {
+                printf("[mload] 短劫持未能让入口执行（不再回退新建线程：已验证不执行）\n");
             }
         } else {
             printf("[mload] 跳过入口调用（自旋探针未通过）\n");
