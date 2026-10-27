@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -89,11 +90,20 @@ static inline bool map_into(mach_port_t task, const char* path, Mapped& out) {
     size_t rounded = (sz + pageSz - 1) & ~(pageSz - 1);
 
     // 1) 本地只读映射（后面 mach_make_memory_entry 需要一块已映射的区域）
-    void* local = mmap(nullptr, rounded, PROT_READ, MAP_PRIVATE, out.fd, 0);
+    // 本地映射必须同时带 PROT_EXEC：
+    // 后面要向内核请求"可执行"的 memory object，如果源映射没有执行权限，
+    // mach_make_memory_entry_64 会返回 KERN_PROTECTION_FAILURE(2)（实测就是这个）。
+    void* local = mmap(nullptr, rounded, PROT_READ | PROT_EXEC, MAP_PRIVATE, out.fd, 0);
     if (local == MAP_FAILED) {
-        printf("[filemap] 本地 mmap 失败\n");
-        close(out.fd); out.fd = -1;
-        return false;
+        printf("[filemap] 本地 mmap(READ|EXEC) 失败: %s\n", strerror(errno));
+        // 退化尝试：只读映射（后面 make_memory_entry 多半会失败，但留下对照日志）
+        local = mmap(nullptr, rounded, PROT_READ, MAP_PRIVATE, out.fd, 0);
+        if (local == MAP_FAILED) {
+            printf("[filemap] 只读映射也失败: %s\n", strerror(errno));
+            close(out.fd); out.fd = -1;
+            return false;
+        }
+        printf("[filemap] 警告: 只能拿到只读映射，执行权限请求预计会失败\n");
     }
     out.localMap = local;
     out.localSize = rounded;
