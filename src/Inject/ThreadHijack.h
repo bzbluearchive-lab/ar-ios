@@ -173,9 +173,10 @@ inline bool hijack_call(mach_port_t task, uintptr_t fn, uint64_t x0,
     bool done = false;
     int tried = 0;
 
-    // 从 i=1 开始：task_threads 的第 0 个通常是主线程，
-    // 劫持主线程等于堵死目标的 run loop，watchdog 会立刻杀掉进程。
-    for (mach_msg_type_number_t i = (count > 1 ? 1 : 0); i < count && !done && tried < maxTries; i++) {
+    // 从线程表**末尾**往前挑：第 0 个通常是主线程（劫持它等于堵死 run loop，
+    // watchdog 会立刻杀进程），末尾一般是工作线程，被短暂占用影响最小。
+    for (int idx = (int)count - 1; idx >= 1 && !done && tried < maxTries; idx--) {
+        mach_msg_type_number_t i = (mach_msg_type_number_t)idx;
         SavedThread sv;
         sv.tid = list[i];
 
