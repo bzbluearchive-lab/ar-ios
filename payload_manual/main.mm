@@ -132,7 +132,7 @@ void arp_note(const char* notePath) {
 #define AR_MAGIC_DONE    0xDEADBEEFL
 
 extern "C" __attribute__((visibility("default")))
-volatile long g_slot[8];
+volatile long g_slot[8] = {0};   // 带初始化才是"定义"，否则链接期是 undefined
 
 extern "C" __attribute__((visibility("default")))
 void arp_probe(const char* notePath) {
