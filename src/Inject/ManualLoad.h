@@ -344,6 +344,31 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
            (unsigned long long)lo, (unsigned long long)hi, span);
 
     // 2) 目标里分配
+    // 关键诊断：目标是否被挂起。挂起的进程线程不调度，
+    // 之前很多次"劫持 entered=0 / 新建线程不执行"都是这个原因。
+    {
+        task_basic_info_data_t bi;
+        mach_msg_type_number_t bc = TASK_BASIC_INFO_COUNT;
+        if (task_info(task, TASK_BASIC_INFO, (task_info_t)&bi, &bc) == KERN_SUCCESS) {
+            printf("[mload] 目标状态: suspend_count=%d 虚拟内存=%llu MB 常驻=%llu MB\n",
+                   bi.suspend_count,
+                   (unsigned long long)(bi.virtual_size / (1024 * 1024)),
+                   (unsigned long long)(bi.resident_size / (1024 * 1024)));
+            if (bi.suspend_count > 0) {
+                printf("[mload] 警告: 目标处于挂起状态（suspend_count>0），"
+                       "它的线程不会执行任何代码；请确认游戏在前台\n");
+            }
+        }
+        thread_act_array_t tl = nullptr;
+        mach_msg_type_number_t tc = 0;
+        if (task_threads(task, &tl, &tc) == KERN_SUCCESS && tl) {
+            printf("[mload] 目标线程数=%u\n", tc);
+            if (tc < 5) printf("[mload] 警告: 线程数异常少，这很可能不是正常运行的游戏实例\n");
+            for (mach_msg_type_number_t k = 0; k < tc; k++) mach_port_deallocate(mach_task_self(), tl[k]);
+            vm_deallocate(mach_task_self(), (vm_address_t)tl, tc * sizeof(thread_t));
+        }
+    }
+
     vm_address_t base = 0;
     if (vm_allocate(task, &base, (vm_size_t)span, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
         printf("[mload] vm_allocate 失败\n");

@@ -103,7 +103,7 @@ inline bool probe_execution(mach_port_t task, uintptr_t fn, int samples = 20, in
 
     bool ok = false;
     // 同样跳过主线程：探针会自旋，占住主线程会被 watchdog 干掉
-    for (mach_msg_type_number_t i = (count > 1 ? 1 : 0); i < count && !ok; i++) {
+    for (mach_msg_type_number_t i = (count > 1 ? 1 : 0); i < count && !ok; i++) {  // 同上
         arm_thread_state64_t sv;
         mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
         if (thread_get_state(list[i], ARM_THREAD_STATE64, (thread_state_t)&sv, &cnt) != KERN_SUCCESS) continue;
@@ -175,7 +175,10 @@ inline bool hijack_call(mach_port_t task, uintptr_t fn, uint64_t x0,
 
     // 从线程表**末尾**往前挑：第 0 个通常是主线程（劫持它等于堵死 run loop，
     // watchdog 会立刻杀进程），末尾一般是工作线程，被短暂占用影响最小。
-    for (int idx = (int)count - 1; idx >= 1 && !done && tried < maxTries; idx--) {
+    // 线程数只有 1 时没有"非主线程"可选，只能用它（进程很可能不是正常运行态，
+    // 这种情况下执行与否本身就是要观察的信息）。
+    int floorIdx = (count > 1) ? 1 : 0;
+    for (int idx = (int)count - 1; idx >= floorIdx && !done && tried < maxTries; idx--) {
         mach_msg_type_number_t i = (mach_msg_type_number_t)idx;
         SavedThread sv;
         sv.tid = list[i];
