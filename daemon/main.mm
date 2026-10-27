@@ -161,6 +161,15 @@ int main(int argc, char** argv) {
                         snprintf(note, sizeof(note), "%s/tmp/ar_manual_probe.txt", container);
                     L("面包屑路径=%s", note[0] ? note : "(none)");
                     uintptr_t rb = mload::map_and_call(task, payload, "arp_probe", note[0] ? note : nullptr, true);
+                    if (!rb) {
+                        // 目标挂起 / 注入未成功：不记 lastInjected，下一轮 tick 继续试，
+                        // 这样等你把游戏切回前台（suspend_count 变 0）后能自动注入。
+                        L("本次注入未成功（目标可能挂起），下一轮重试");
+                        mach_port_deallocate(mach_task_self(), task);
+                        usleep(300 * 1000);
+                        lastInjected = 0;
+                        continue;
+                    }
                 // 注入后回读面包屑文件：让 daemon 日志自带"代码有没有跑起来"的结论，
                 // 不用再去翻 ar_full_log.txt。
                 sleep(2);

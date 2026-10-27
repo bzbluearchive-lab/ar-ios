@@ -305,8 +305,28 @@ static inline bool read_remote_slot(mach_port_t task, uint64_t addr, long out[5]
     return got == sizeof(long) * 5;
 }
 
+
+// 目标是否处于"可执行"状态（没有被系统挂起）。
+// 挂起的进程其线程完全不调度：劫持进去 PC 不会动、新建线程也不会跑，
+// 探针还会给出假阳性（PC 冻结在我们设置的位置上，看起来像在跑）。
+inline bool target_is_running(mach_port_t task, int* suspendOut = nullptr) {
+    task_basic_info_data_t bi;
+    mach_msg_type_number_t bc = TASK_BASIC_INFO_COUNT;
+    if (task_info(task, TASK_BASIC_INFO, (task_info_t)&bi, &bc) != KERN_SUCCESS) {
+        if (suspendOut) *suspendOut = -1;
+        return false;
+    }
+    if (suspendOut) *suspendOut = bi.suspend_count;
+    return bi.suspend_count == 0;
+}
+
 // ---------------- 主流程：把 dylib 手动映射进目标并调用入口 ----------------
 inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const char* entrySym, const char* notePath = nullptr, bool hijackEntry = false) {
+    int susp = 0;
+    if (!target_is_running(task, &susp)) {
+        printf("[mload] 目标不可执行: suspend_count=%d -> 本次放弃注入（等它回到前台）\n", susp);
+        return 0;
+    }
     Image img;
     FILE* f = fopen(dylibPath, "rb");
     if (!f) { printf("[mload] 打不开 %s\n", dylibPath); return 0; }
