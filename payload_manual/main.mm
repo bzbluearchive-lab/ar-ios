@@ -124,25 +124,21 @@ void arp_note(const char* notePath) {
 }
 
 
-// 最小二分版本：只写内存，不做任何 syscall、不调用任何外部函数。
-// 目的：把"执行 + 写内存"和"进内核"两件事彻底分开。
-//   - 这个版本如果 slot 里有 magic 且进程存活 -> 执行与内存写没问题，
-//     之前的崩溃就是裸 syscall 造成的。
-//   - 如果这个版本也崩 -> 问题在更底层（栈/寄存器/执行页）。
-#define AR_MAGIC_ENTERED 0xC0FFEE11L
-#define AR_MAGIC_DONE    0xDEADBEEFL
-
+// 最小二分：不使用任何全局变量、不做任何 syscall。
+// 写目标地址完全来自 x0（注入方 vm_allocate 出来的、确定可写的一块内存）。
+//   这一步只为回答一个问题：从映射进来的代码里"写内存"会不会崩。
+//   如果崩 -> 说明是 rebase 没修好（全局变量地址是 0）或者页权限，
+//   如果不崩 -> 说明可以用寄存器传参的方式做全部事情，绕开全局变量。
 extern "C" __attribute__((visibility("default")))
-volatile long g_slot[8] = {0};
-
-extern "C" __attribute__((visibility("default")))
-void arp_probe(const char* notePath) {
-    (void)notePath;
-    g_slot[0] = AR_MAGIC_ENTERED;   // 第一个写入：证明代码开始执行
-    g_slot[1] = 0x1111222233334444L;
-    g_slot[3] = AR_MAGIC_DONE;
+void arp_probe(void* slot) {
+    if (slot) {
+        volatile long* p = (volatile long*)slot;
+        p[0] = 0xC0FFEE11;          // 代码执行标记
+        p[1] = 0x1122334455667788L;
+        p[3] = 0xDEADBEEF;          // 完成标记
+    }
     volatile unsigned long n = 0;
-    for (;;) { g_slot[2] = (long)(++n); }   // 持续写，便于外部观察它在跑
+    for (;;) { n++; }               // 与 arp_spin 完全一致的自旋
 }
 
 // 纯自旋：不调用任何外部函数，用来验证"映射进来的代码能否被执行"
