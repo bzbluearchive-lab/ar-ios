@@ -275,10 +275,24 @@ inline uintptr_t resolve_sym(const Image& img, const char* name) {
     const char* strs = (const char*)(img.file + sym->stroff);
     for (uint32_t i = 0; i < sym->nsyms; i++) {
         if (nl[i].n_un.n_strx == 0) continue;
+        // 关键：只接受"已定义的段内符号"。
+        // 符号表里同一个名字可能既有未定义项（n_value=0，表示"我要引用它"），
+        // 又有定义项。之前没过滤，结果 g_slot 解析成偏移 0（指向 Mach-O 头），
+        // 代码往那里写就撞进 RX 段，进程当场被杀。
+        if ((nl[i].n_type & N_TYPE) != N_SECT) continue;
+        if (nl[i].n_sect == 0) continue;
+        if (nl[i].n_value == 0) continue;
         const char* nm = strs + nl[i].n_un.n_strx;
         if (nm[0] == '_') nm++;
-        if (strcmp(nm, name) == 0) return img.remoteBase + nl[i].n_value;
+        if (strcmp(nm, name) == 0) {
+            uintptr_t addr = img.remoteBase + nl[i].n_value;
+            printf("[mload] 符号 %s: n_value=0x%llx sect=%u -> 0x%llx\n",
+                   name, (unsigned long long)nl[i].n_value,
+                   (unsigned)nl[i].n_sect, (unsigned long long)addr);
+            return addr;
+        }
     }
+    printf("[mload] 符号 %s 未找到（已定义项）\n", name);
     return 0;
 }
 
