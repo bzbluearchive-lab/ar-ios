@@ -431,6 +431,8 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
             }
         }
     }
+    vm_address_t slot = 0;   // payload 结果槽（作用域要覆盖整个入口流程）
+
     if (entry) {
         // ---- 1) 先做安全的自旋探针：只验证"映射进来的代码能否被执行" ----
         //     arp_spin 不调用任何外部函数，所以它失败不会破坏目标；
@@ -460,7 +462,6 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
 
             // 结果槽：payload 把每一步的执行结果写在这里，我们直接读回，
             // 完全不依赖目标沙盒里的文件系统。
-            vm_address_t slot = 0;
             if (vm_allocate(task, &slot, 0x1000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) slot = 0;
             printf("[mload] 结果槽=0x%llx\n", (unsigned long long)slot);
             if (noteAddr)
