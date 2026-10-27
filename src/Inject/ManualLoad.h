@@ -251,6 +251,24 @@ static inline uintptr_t write_string(mach_port_t task, const char* s) {
     return (uintptr_t)addr;
 }
 
+
+// 在已加载的 Image 里按名字解析导出符号（返回目标进程内的地址）
+inline uintptr_t resolve_sym(const Image& img, const char* name) {
+    if (!img.mh || !img.file || !name) return 0;
+    const struct symtab_command* sym =
+        (const struct symtab_command*)lc_first(img.mh, LC_SYMTAB, img.file);
+    if (!sym) return 0;
+    const struct nlist_64* nl = (const struct nlist_64*)(img.file + sym->symoff);
+    const char* strs = (const char*)(img.file + sym->stroff);
+    for (uint32_t i = 0; i < sym->nsyms; i++) {
+        if (nl[i].n_un.n_strx == 0) continue;
+        const char* nm = strs + nl[i].n_un.n_strx;
+        if (nm[0] == '_') nm++;
+        if (strcmp(nm, name) == 0) return img.remoteBase + nl[i].n_value;
+    }
+    return 0;
+}
+
 // ---------------- 主流程：把 dylib 手动映射进目标并调用入口 ----------------
 inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const char* entrySym, const char* notePath = nullptr, bool hijackEntry = false) {
     Image img;
@@ -418,18 +436,17 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
                    (insn == 0 || insn == 0xFFFFFFFF) ? "  << 全 0/全 F，代码没写进去！" : "");
         }
 
-        // 硬证据：轮询目标线程，看有没有 PC 落在映射范围内（不依赖目标写文件）
-        uint64_t samplePc = 0;
-        int hit = 0;
-        for (int t = 0; t < 50; t++) {
-            usleep(20 * 1000);
-            hit = hijack::threads_running_in_range(task, img.remoteBase,
-                                                   img.remoteBase + 0x20000, &samplePc);
-            if (hit) break;
+        // 独立执行探针：用"纯自旋"（arp_spin，不调用任何外部函数）验证
+        // 映射进来的代码能否被执行。它失败只可能是执行层面的问题，
+        // 而不是 bind 解析错误。采样必须在还原线程状态之前完成。
+        uintptr_t spin = resolve_sym(img, "arp_spin");
+        if (spin) {
+            printf("[mload] 自旋探针地址=0x%llx\n", (unsigned long long)spin);
+            bool okSpin = hijack::probe_execution(task, spin);
+            printf("[mload] 自旋探针结果=%s\n", okSpin ? "代码可执行" : "代码不可执行");
+        } else {
+            printf("[mload] 没找到 arp_spin 符号，跳过执行探针\n");
         }
-        printf("[mload] 执行探测: 映射范围内的线程数=%d 样本PC=0x%llx\n",
-               hit, (unsigned long long)samplePc);
-        if (!hit) printf("[mload] 代码没有开始执行（PC 从未落在映射范围内）\n");
     } else {
         printf("[mload] 没找到入口符号 %s（只跑了 init）\n", entrySym ? entrySym : "(null)");
     }

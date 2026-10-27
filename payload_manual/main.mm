@@ -90,6 +90,15 @@ static void buildOverlay(const char* notePath) {
     }
 }
 
+// 纯自旋探针：不调用任何外部函数、不碰栈、不碰 TLS。
+// 用来判断"映射进去的代码到底能不能被执行"——如果这个都能跑，说明执行没问题，
+// 问题就出在后面的外部调用（bind 解析）上。
+extern "C" __attribute__((visibility("default")))
+void arp_spin(void) {
+    volatile unsigned long n = 0;
+    for (;;) { n++; }
+}
+
 // 注入方通过 x0 传入面包屑路径
 extern "C" __attribute__((visibility("default")))
 void arp_entry(const char* notePath) {

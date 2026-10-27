@@ -88,6 +88,69 @@ inline uintptr_t alloc_stack(mach_port_t task, size_t size) {
     return (uintptr_t)base;
 }
 
+// 执行探针：把一个线程的 PC 指到 fn（应当是一段纯自旋代码），
+// 在**还原之前**多次采样 PC，看它是否稳定停留在 [fn, fn+0x400)。
+// 这是"映射进来的代码能否被执行"的最直接证据。
+inline bool probe_execution(mach_port_t task, uintptr_t fn, int samples = 20, int gapMs = 5) {
+    if (!task || !fn) return false;
+    thread_act_array_t list = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(task, &list, &count) != KERN_SUCCESS || !list) return false;
+
+    uintptr_t stack = alloc_stack(task, 0x10000);
+    if (!stack) { printf("[probe] 栈分配失败\n"); return false; }
+    uint64_t stackTop = (uint64_t)((stack + 0x10000) & ~0xFULL);
+
+    bool ok = false;
+    for (mach_msg_type_number_t i = 0; i < count && !ok; i++) {
+        arm_thread_state64_t sv;
+        mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(list[i], ARM_THREAD_STATE64, (thread_state_t)&sv, &cnt) != KERN_SUCCESS) continue;
+        if (sv.__pc == 0) continue;
+
+        if (thread_suspend(list[i]) != KERN_SUCCESS) continue;
+        arm_thread_state64_t st = sv;
+        st.__pc = (uint64_t)fn;
+        st.__sp = stackTop;
+        st.__lr = 0;
+        if (thread_set_state(list[i], ARM_THREAD_STATE64,
+                             (thread_state_t)&st, ARM_THREAD_STATE64_COUNT) != KERN_SUCCESS) {
+            thread_resume(list[i]);
+            continue;
+        }
+        thread_resume(list[i]);
+
+        int inside = 0, total = 0;
+        for (int s = 0; s < samples; s++) {
+            usleep(gapMs * 1000);
+            arm_thread_state64_t now;
+            mach_msg_type_number_t c2 = ARM_THREAD_STATE64_COUNT;
+            if (thread_get_state(list[i], ARM_THREAD_STATE64, (thread_state_t)&now, &c2) != KERN_SUCCESS) break;
+            total++;
+            if (now.__pc >= fn && now.__pc < fn + 0x400) inside++;
+        }
+        printf("[probe] tid=%u 采样 %d 次，PC 落在自旋代码内 %d 次\n", (unsigned)i, total, inside);
+        ok = (total > 0 && inside * 2 >= total);
+
+        // 还原（失败则重试一次，绝不留下脏状态）
+        thread_suspend(list[i]);
+        kern_return_t r = thread_set_state(list[i], ARM_THREAD_STATE64,
+                                           (thread_state_t)&sv, ARM_THREAD_STATE64_COUNT);
+        if (r != KERN_SUCCESS) {
+            printf("[probe] 还原失败 %d，重试\n", r);
+            usleep(5000);
+            r = thread_set_state(list[i], ARM_THREAD_STATE64,
+                                 (thread_state_t)&sv, ARM_THREAD_STATE64_COUNT);
+        }
+        thread_resume(list[i]);
+        printf("[probe] 还原 -> %d\n", r);
+        if (r != KERN_SUCCESS) { ok = false; break; }
+    }
+
+    for (mach_msg_type_number_t i = 0; i < count; i++) mach_port_deallocate(mach_task_self(), list[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)list, count * sizeof(thread_t));
+    return ok;
+}
 // 主流程：在目标里挑一个线程，暂停、改寄存器、恢复、等待、还原
 inline bool hijack_call(mach_port_t task, uintptr_t fn, uint64_t x0,
                         int timeoutMs = 2000, int maxTries = 8) {
