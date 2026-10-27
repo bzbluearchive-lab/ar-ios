@@ -104,10 +104,14 @@ static inline bool apply_fixups(Image& img, mach_port_t task) {
     const struct dyld_chained_fixups_header* hdr =
         (const struct dyld_chained_fixups_header*)(img.file + fixupsFileOff);
     printf("[mload] fixups 头: format=%u starts=%u imports=%u symbols=%u\n",
-           hdr->import_format, hdr->starts_offset, hdr->imports_offset, hdr->symbols_offset);
-    if (hdr->import_format != DYLD_CHAINED_IMPORT) {
-        printf("[mload] 警告: import_format=%u 不是 1(Ptr)，import 表步长可能不同\n",
-               hdr->import_format);
+           hdr->imports_format, hdr->starts_offset, hdr->imports_offset, hdr->symbols_offset);
+    if (hdr->imports_format == DYLD_CHAINED_IMPORT_ADDEND64) {
+        printf("[mload] 致命: imports_format=3 (ADDEND64)，当前实现不支持\n");
+        return false;
+    }
+    if (hdr->imports_format != DYLD_CHAINED_IMPORT && hdr->imports_format != DYLD_CHAINED_IMPORT_ADDEND) {
+        printf("[mload] 警告: imports_format=%u 不是 1(Ptr)，import 表步长可能不同\n",
+               hdr->imports_format);
     }
     const uint8_t* starts = img.file + fixupsFileOff + hdr->starts_offset;
     const struct dyld_chained_starts_in_image* si =
