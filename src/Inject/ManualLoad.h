@@ -496,14 +496,14 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
         // ---- 1) 先做安全的自旋探针：只验证"映射进来的代码能否被执行" ----
         //     arp_spin 不调用任何外部函数，所以它失败不会破坏目标；
         //     探针不过就绝不调用 arp_entry，避免为了解一个未知问题把游戏搞崩。
-        uintptr_t spin = 0;   // 暂时关掉自旋探针：它要冻结游戏线程，风险大于收益
-        bool spinOk = false;
+        uintptr_t spin = 0;   // 自旋探针要冻结游戏线程，风险大于收益，先关掉
+        bool spinOk = true;   // 探针关掉时不作为闸门：入口照常执行，用结果槽判断成败
         if (spin) {
             printf("[mload] 自旋探针地址=0x%llx\n", (unsigned long long)spin);
             spinOk = hijack::probe_execution(task, spin);
             printf("[mload] 自旋探针结果=%s\n", spinOk ? "代码可执行" : "代码不可执行");
         } else {
-            printf("[mload] 没找到 arp_spin 符号，无法确认可执行性；跳过入口调用以策安全\n");
+            printf("[mload] 自旋探针已关闭，直接用结果槽判断入口是否执行\n");
         }
 
         // ---- 2) 回读入口首指令（确认内容写对了）----
