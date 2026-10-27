@@ -530,15 +530,15 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
                        (unsigned long long)noteAddr, notePath);
             printf("[mload] 调用入口 %s @ 0x%llx (x0=槽 0x%llx) 方式=%s\n", entrySym,
                    (unsigned long long)entry, (unsigned long long)slot,
-                   hijackEntry ? "短窗口劫持(25ms)" : "新建线程");
+                   hijackEntry ? "短窗口劫持(60ms)" : "新建线程");
 
             // 短窗口劫持：每次只冻结一个游戏线程 25ms。
             // 每试一次就读结果槽，有值就停 —— 平均冻结时间最短，
             // 既能让代码跑完，又不会让游戏卡到被 watchdog 杀掉。
             long probeVals[5] = {0, 0, 0, 0, 0};
             bool ranOk = false;
-            for (int attempt = 0; attempt < 3 && !ranOk; attempt++) {
-                hijack::hijack_quick(task, entry, (uint64_t)slot, 25, 1);
+            for (int attempt = 0; attempt < 2 && !ranOk; attempt++) {
+                hijack::hijack_quick(task, entry, (uint64_t)slot, 60, 3);
                 usleep(150 * 1000);
                 if (slot && read_remote_slot(task, slot, probeVals) && probeVals[0] != 0) {
                     ranOk = true;

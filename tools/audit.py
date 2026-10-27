@@ -142,6 +142,8 @@ if ml:
         FAIL.append("[逻辑] ManualLoad 缺少挂起门禁 target_is_running")
     if "suspend_count" not in ml:
         FAIL.append("[逻辑] ManualLoad 未检查 suspend_count，会在冻结进程上白干")
+    if "THREAD_BASIC_INFO" in ml and "mach/thread_info.h" not in ml and "thread_info.h" not in ml:
+        FAIL.append("[平台] ManualLoad 用了 THREAD_BASIC_INFO 但没 include <mach/thread_info.h>")
     if "N_SECT" not in ml:
         FAIL.append("[逻辑] resolve_sym 未过滤未定义符号（会把全局变量解析成偏移 0）")
     if "hijack_quick" not in ml:
@@ -155,6 +157,8 @@ if ml:
 
 th = read("src/Inject/ThreadHijack.h")
 if th:
+    if "THREAD_BASIC_INFO" in th and "mach/thread_info.h" not in th:
+        FAIL.append("[平台] ThreadHijack 用了 THREAD_BASIC_INFO 但没 include <mach/thread_info.h>")
     if "hijack_quick" not in th:
         FAIL.append("[逻辑] ThreadHijack 缺少 hijack_quick")
     # 短劫持里必须释放借用栈，否则每次注入泄漏 32KB
