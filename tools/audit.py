@@ -208,6 +208,10 @@ if src_h:
     missing = sorted(x for x in used if x not in defined)
     if missing:
         FAIL.append("[语法] host/main.mm 里 selector 无实现（点击必崩）: " + ", ".join(missing))
+    # 反向检查：写了 onXxx 动作方法却没有任何按钮引用 -> 功能等于没做
+    orphan = sorted(x for x in defined if re.match(r'^on[A-Z]', x) and x not in used)
+    if orphan:
+        FAIL.append("[界面] 动作方法存在但没有按钮绑定（用户看不到入口）: " + ", ".join(orphan))
 
 # ---------------- 输出 ----------------
 print("=" * 60)

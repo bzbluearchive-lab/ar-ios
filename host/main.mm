@@ -503,6 +503,13 @@ static void ARInjectSpringBoard(const char* kw) {
     [stBtn2 addTarget:self action:@selector(onSelfExec) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:stBtn2];
 
+    UIButton* stBtn3 = [UIButton buttonWithType:UIButtonTypeSystem];
+    stBtn3.frame = CGRectMake(pad, 470, w - pad*2, 40);
+    [stBtn3 setTitle:@"自测C：执行已签名页（对照实验）" forState:UIControlStateNormal];
+    [stBtn3 addTarget:self action:@selector(onSelfSigned) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:stBtn3];
+
+
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
     scan.frame = CGRectMake(pad*2 + (w - pad*3)/2, 190, (w - pad*3)/2, 48);
