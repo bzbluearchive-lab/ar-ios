@@ -164,10 +164,10 @@ int main(int argc, char** argv) {
                     if (!rb) {
                         // 目标挂起 / 注入未成功：不记 lastInjected，下一轮 tick 继续试，
                         // 这样等你把游戏切回前台（suspend_count 变 0）后能自动注入。
-                        L("本次注入未成功（目标可能挂起），下一轮重试");
+                        L("本次注入未成功（目标可能挂起），2 秒后重试");
                         mach_port_deallocate(mach_task_self(), task);
-                        usleep(300 * 1000);
                         lastInjected = 0;
+                        sleep(2);      // 与正常轮询同节奏，避免刷屏式重试
                         continue;
                     }
                 // 注入后回读面包屑文件：让 daemon 日志自带"代码有没有跑起来"的结论，

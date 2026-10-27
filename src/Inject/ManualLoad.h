@@ -491,6 +491,7 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
         }
     }
     vm_address_t slot = 0;   // payload 结果槽（作用域要覆盖整个入口流程）
+    bool entryRan = false;   // 入口是否真的执行过（由结果槽判定）
 
     if (entry) {
         // ---- 1) 先做安全的自旋探针：只验证"映射进来的代码能否被执行" ----
@@ -541,6 +542,7 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
                 usleep(150 * 1000);
                 if (slot && read_remote_slot(task, slot, probeVals) && probeVals[0] != 0) {
                     ranOk = true;
+                    entryRan = true;
                     printf("[mload] 第 %d 次短劫持后结果槽有值 -> 代码已执行\n", attempt + 1);
                 } else {
                     printf("[mload] 第 %d 次短劫持后结果槽仍为空\n", attempt + 1);
@@ -574,6 +576,12 @@ inline uintptr_t map_and_call(mach_port_t task, const char* dylibPath, const cha
         printf("[mload] 没找到入口符号 %s（只跑了 init）\n", entrySym ? entrySym : "(null)");
     }
 
+    // 入口没真正执行（结果槽为空）时返回 0：
+    // 这样 daemon 不会把它记成"已注入"，下一轮还会重试。
+    if (entry && !entryRan) {
+        printf("[mload] 入口未执行 -> 返回 0，交给调用方重试\n");
+        return 0;
+    }
     return img.remoteBase;
 }
 

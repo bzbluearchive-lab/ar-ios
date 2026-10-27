@@ -225,6 +225,8 @@ inline bool hijack_quick(mach_port_t task, uintptr_t fn, uint64_t x0,
 
     for (mach_msg_type_number_t i = 0; i < count; i++) mach_port_deallocate(mach_task_self(), list[i]);
     vm_deallocate(mach_task_self(), (vm_address_t)list, count * sizeof(thread_t));
+    // 释放借用的栈：重试循环下不释放会持续泄漏（每次 32KB）
+    vm_deallocate(task, (vm_address_t)stack, 0x8000);
     printf("[hijack] 短劫持结束: tried=%d ok=%d\n", tried, ok);
     return ok;
 }

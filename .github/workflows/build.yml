@@ -29,6 +29,8 @@ jobs:
           which ldid clang make
 
       - name: 静态自检
+        run: python3 tools/audit.py
+      - name: 注入链逻辑审查
         run: python3 tools/preflight.py
 
       - name: 构建
