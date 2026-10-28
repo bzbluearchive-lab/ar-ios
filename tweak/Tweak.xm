@@ -22,11 +22,16 @@
 // ---------------- 日志 ----------------
 static NSString* arLogPath(void) {
     // 越狱环境下优先写全局可读路径，方便从 SSH 直接 cat
-    NSArray* cands = @[
-        @"/var/mobile/ar_tweak.log",
-        @"/var/tmp/ar_tweak.log",
-        [NSTemporaryDirectory() stringByAppendingPathComponent:@"ar_tweak.log"],
-    ];
+    // 优先写进游戏自己的容器（Documents）：
+    //   这样可以用 house_arrest 通过 USB 直接拉出来，不需要 SSH，也不需要截图。
+    NSString* docPath = nil;
+    NSArray* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (docs.count) docPath = [docs[0] stringByAppendingPathComponent:@"ar_tweak.log"];
+
+    NSMutableArray* cands = [NSMutableArray array];
+    if (docPath) [cands addObject:docPath];
+    [cands addObject:@"/var/mobile/ar_tweak.log"];
+    [cands addObject:@"/var/tmp/ar_tweak.log"];
     for (NSString* p in cands) {
         NSString* dir = [p stringByDeletingLastPathComponent];
         if ([[NSFileManager defaultManager] fileExistsAtPath:dir]) return p;
