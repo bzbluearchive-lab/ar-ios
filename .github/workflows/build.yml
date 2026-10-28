@@ -42,11 +42,16 @@ jobs:
 
       - name: 构建越狱版插件 (tweak deb)
         run: |
+          set -euo pipefail
+          export THEOS=$HOME/theos
+          export PATH="/opt/homebrew/bin:$PATH"
           cd tweak
-          make clean package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 2>&1 | tail -40
-          ls -la packages/ || true
+          make clean all THEOS_PACKAGE_SCHEME=rootless
+          ls -la .theos/obj/*/ 2>/dev/null || true
           mkdir -p ../build
-          cp packages/*.deb ../build/ 2>/dev/null || true
+          cd ..
+          python3 tools/make_deb.py AREsp tweak build/AREsp.deb
+          ls -la build/
       - name: 校验产物
         run: |
           set -e
