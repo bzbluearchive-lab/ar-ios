@@ -53,6 +53,35 @@ ent build/ents/P2b.plist platform-application com.apple.private.security.no-sand
 # 目的：验证 iOS 的 JIT 限制能否被 entitlement 打开（TrollStore 可授予任意 entitlement）。
 ent build/ents/P2c.plist platform-application com.apple.private.security.no-sandbox task_for_pid-allow com.apple.system-task-ports get-task-allow \
                         dynamic-codesigning com.apple.private.cs.dynamic-codesigning run-unsigned-code com.apple.private.amfi.can-execute-cdhash
+# K3：从可用商用产品（播客.RS.R）实测到的权限集合。
+# 关键增量：
+#   com.apple.security.exception.iokit-user-client-class  -> kfd 物理内存映射的硬需求
+#   com.apple.springboard.accessibility-window-hosting    -> 跨 app 浮窗
+#   com.apple.private.security.storage.AppBundles         -> 读其他 App 的 bundle
+#   com.apple.private.persona-mgmt                        -> 容器/身份管理
+ent build/ents/K3.plist platform-application com.apple.private.security.no-sandbox task_for_pid-allow com.apple.system-task-ports get-task-allow \
+                        com.apple.private.security.storage.AppBundles com.apple.private.persona-mgmt \
+                        com.apple.springboard.accessibility-window-hosting
+# K3b：K3 基础上再加 IOKit 用户客户端类（kfd 的 physpuppet/landa 需要）
+cat > build/ents/K3b.plist <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>platform-application</key><true/>
+  <key>com.apple.private.security.no-sandbox</key><true/>
+  <key>task_for_pid-allow</key><true/>
+  <key>com.apple.system-task-ports</key><true/>
+  <key>get-task-allow</key><true/>
+  <key>com.apple.private.security.storage.AppBundles</key><true/>
+  <key>com.apple.private.persona-mgmt</key><true/>
+  <key>com.apple.springboard.accessibility-window-hosting</key><true/>
+  <key>com.apple.security.exception.iokit-user-client-class</key>
+  <array>
+    <string>AGXDeviceUserClient</string>
+    <string>IOSurfaceRootUserClient</string>
+  </array>
+</dict></plist>
+PLIST
 ent build/ents/K2.plist task_for_pid-allow com.apple.system-task-ports get-task-allow \
                         com.apple.private.skip-library-validation run-unsigned-code
 
@@ -91,7 +120,7 @@ build_variant() {
 }
 
 # P2b = 无沙盒 + 拿 task port 的权限（这两组各自都验证过不崩）
-build_variant G55 com.local.arg55 "AR G55" build/ents/P2c.plist ARHost-G55.ipa
+build_variant G57 com.local.arg57 "AR G57" build/ents/P2b.plist ARHost-G57.ipa
 
 
 echo

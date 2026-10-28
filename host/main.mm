@@ -21,6 +21,7 @@
 #include "../src/Inject/ContainerCopy.h"
 #include "../src/Inject/ManualLoad.h"
 #include "../src/Inject/FileMap.h"
+#include "../src/Inject/TaskPorts.h"
 #include "../src/Game/Ue4Remote.h"
 #include "../src/Kernel/KernelBackend.h"
 #include "../src/Kernel/BuildTable.h"
@@ -465,6 +466,45 @@ static void ARSelfTestJIT(void) {
     printf("=== 自测E 结束 ===\n");
 }
 
+
+// ---------------------------------------------------------------------------
+// 取任务端口测试：用 processor_set_tasks 而非 task_for_pid
+//   商用产品（播客.RS.R）的导入表里就有 processor_set_tasks，
+//   这条路绕开 task_for_pid 的平台二进制限制。
+// ---------------------------------------------------------------------------
+static void ARTestTaskPorts(void) {
+    printf("\n=== processor_set_tasks 取任务端口 ===\n");
+
+    // 先枚举一下当前所有能拿到的 task，确认这条路本身通不通
+    int total = 0;
+    taskports::Found probe = taskports::find_by_pid(getpid(), &total);
+    printf("[tports] 本进程 pid=%d -> port=%u（枚举到 %d 个 task）\n",
+           getpid(), probe.port, total);
+
+    if (!probe.port) {
+        printf("[tports] 连自己的 task 都拿不到 -> 这条路权限不足\n");
+        return;
+    }
+    taskports::verify(probe.port, getpid());
+
+    // 再找目标游戏
+    pid_t game = rload::find_pid_comm("UAGame");
+    printf("[tports] 目标游戏 pid=%d\n", game);
+    if (!game) {
+        printf("[tports] 游戏没在运行，先打开游戏\n");
+        return;
+    }
+
+    taskports::Found g = taskports::find_by_pid(game);
+    if (!g.port) {
+        printf("[tports] 没拿到游戏 task port\n");
+        return;
+    }
+    bool ok = taskports::verify(g.port, g.pid);
+    printf("[tports] 结论: %s\n", ok ? "拿到游戏 task port 且可读内存" : "拿到端口但读不到内存");
+    printf("=== 测试结束 ===\n");
+}
+
 static void ARDumpBreadcrumbs(void);
 
 
@@ -632,6 +672,12 @@ static void ARInjectSpringBoard(const char* kw) {
     [stBtn5 addTarget:self action:@selector(onSelfJIT) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:stBtn5];
 
+    UIButton* tpBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    tpBtn.frame = CGRectMake(pad, 570, w - pad*2, 34);
+    [tpBtn setTitle:@"取任务端口（processor_set_tasks）" forState:UIControlStateNormal];
+    [tpBtn addTarget:self action:@selector(onTaskPorts) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:tpBtn];
+
 
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -649,7 +695,7 @@ static void ARInjectSpringBoard(const char* kw) {
     self.keyword.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
     [self.view addSubview:self.keyword];
 
-    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 582, w - pad*2, self.view.bounds.size.height - 602)];
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 612, w - pad*2, self.view.bounds.size.height - 632)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     [self.view addSubview:self.logView];
@@ -819,6 +865,20 @@ static void ARScanOnly(const char* kw) {
                                                      encoding:NSUTF8StringEncoding error:nil];
             self.logView.text = log ?: @"(没有日志)";
             self.status.text = @"扫描完成，未注入";
+        });
+    });
+}
+
+- (void)onTaskPorts {
+    self.status.text = @"取任务端口中…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ARRedirectToLog();
+        ARTestTaskPorts();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
+                                                     encoding:NSUTF8StringEncoding error:nil];
+            self.logView.text = log ?: @"(没有日志)";
+            self.status.text = @"端口测试结束";
         });
     });
 }
