@@ -10,8 +10,13 @@ include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = ARHost
 
-ARHost_FILES = main.mm
-ARHost_CFLAGS = -fobjc-arc -I../src -I../src/Host -I. -std=c++17 -Wno-error
+ARHost_FILES = main.mm ../src/Kernel/kfd_glue.c
+# 注意：_CFLAGS 会传给所有源文件，包括新加的 C 文件 kfd_glue.c。
+# -fobjc-arc 与 -std=c++17 对 C 源文件是非法参数（clang 直接报错），
+# 所以它们必须放到 _CCFLAGS（C++/ObjC++ 专用）里。
+ARHost_CFLAGS  = -I../src -I../src/Host -I. -Wno-error
+ARHost_CCFLAGS = -fobjc-arc -std=c++17
+ARHost_CXXFLAGS = -fobjc-arc -std=c++17
 ARHost_FRAMEWORKS = UIKit Foundation
 ARHost_CODESIGN_FLAGS = -Sentitlements.plist
 ARHost_INSTALL_PATH = /Applications

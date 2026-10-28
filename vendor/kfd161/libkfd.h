@@ -12,6 +12,19 @@
 #define CONFIG_PRINT 1
 #define CONFIG_TIMER 1
 
+/*
+ * [vendor 补丁] struct ptov_table_entry 原本定义在 struct kfd 内部（下方 L83 附近），
+ * 但 libkfd/perf.h 在本文件顶部就被 include，编译到 perf.h 的 phystokv() 时
+ * 该 tag 还不存在 -> "subscript of pointer to incomplete type"。
+ * C 语言里 tag 是文件作用域的，所以把它提到所有 include 之前定义一次即可，
+ * 下面 struct kfd 里改成只声明成员。
+ * 用 unsigned long long 是因为此时 u64 还没定义。
+ */
+struct ptov_table_entry {
+    unsigned long long pa;
+    unsigned long long va;
+    unsigned long long len;
+};
 #include "libkfd/common.h"
 
 /*
@@ -80,11 +93,7 @@ struct perf {
         u64 pa;
         u64 va;
     } ttbr[2];
-    struct ptov_table_entry {
-        u64 pa;
-        u64 va;
-        u64 len;
-    } ptov_table[8];
+    struct ptov_table_entry ptov_table[8];   // 类型见文件顶部（vendor 补丁）
     struct {
         u64 kaddr;
         u64 paddr;
