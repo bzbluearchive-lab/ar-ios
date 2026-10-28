@@ -75,5 +75,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ARHost-release
-          path: build/*.ipa
+          path: |
+            build/*.ipa
+            build/*.deb
           if-no-files-found: error
