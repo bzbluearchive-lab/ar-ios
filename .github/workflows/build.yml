@@ -40,6 +40,13 @@ jobs:
           export PATH="/opt/homebrew/bin:$PATH"
           make package
 
+      - name: 构建越狱版插件 (tweak deb)
+        run: |
+          cd tweak
+          make clean package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 2>&1 | tail -40
+          ls -la packages/ || true
+          mkdir -p ../build
+          cp packages/*.deb ../build/ 2>/dev/null || true
       - name: 校验产物
         run: |
           set -e

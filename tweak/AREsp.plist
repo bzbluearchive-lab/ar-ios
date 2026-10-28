@@ -1,0 +1,15 @@
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 只往目标游戏进程注入，绝不注入系统进程 -->
+<plist version="1.0">
+<dict>
+    <key>Filter</key>
+    <array>
+        <dict>
+            <key>Bundles</key>
+            <array>
+                <string>com.proximabeta.mf.uamo</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
