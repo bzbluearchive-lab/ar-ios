@@ -223,7 +223,12 @@ u64 phystokv(struct kfd* kfd, u64 pa)
     const u64 gVirtBase = kfd->perf.gVirtBase;
     const u64 gPhysBase = kfd->perf.gPhysBase;
     const u64 gPhysSize = kfd->perf.gPhysSize;
-    const struct ptov_table_entry* ptov_table = &kfd->perf.ptov_table[0];
+    // [vendor 补丁] 原代码写的是 const struct ptov_table_entry*，
+    // 但该类型定义在 libkfd.h 的 struct kfd 内部（L83），而 perf.h 在文件顶部
+    // 就被 include，编译到这里时该类型还不完整，会报
+    // "subscript of pointer to incomplete type"。
+    // 用 auto* 让编译器从成员类型推导，语义完全不变。
+    const auto* ptov_table = &kfd->perf.ptov_table[0];
 
     for (u64 i = 0; (i < PTOV_TABLE_SIZE) && (ptov_table[i].len != 0); i++) {
         if ((pa >= ptov_table[i].pa) && (pa < (ptov_table[i].pa + ptov_table[i].len))) {
