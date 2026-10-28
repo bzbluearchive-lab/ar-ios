@@ -74,6 +74,19 @@ uint64_t kfdg_kernel_slide(uint64_t handle);
 //   KfdBackend 在 kernel_base 里就是"读到 0xfeedfacf 才算成功"。
 uint64_t kfdg_read_u64(uint64_t handle, uint64_t kaddr);
 
+// 物理地址 → 内核虚拟地址。算法与 vendor/kfd161/libkfd/perf.h:220-238 的 phystokv() 逐行一致，
+// 唯一的改动是：那条 assert（perf.h:236）换成"越界打印 + 返回 0"。
+//   ① 先查 perf.ptov_table[8]：pa 落在某条 [entry.pa, entry.pa + entry.len) 里就返回
+//      pa - entry.pa + entry.va（perf.h:230-234）。
+//   ② 否则用 gVirtBase / gPhysBase / gPhysSize 线性换算：pa - gPhysBase + gVirtBase
+//      （perf.h:236-237）。
+// 返回 0 表示失败（原因已打印）。
+// ★ 只有在 kopen() 成功之后才有意义：gVirtBase / gPhysBase / gPhysSize / ptov_table
+//   全部是 perf_run 里才写进去的（perf.h:142-155）。没填过时本函数直接返回 0 并打印。
+// ★ 0 也可能是"表首"这种合法换算结果，但真实的物理页（PTE 指向的页、ttbr 表页）不会是 0，
+//   所以按 0 当失败处理；调用方拿到 0 就停手。
+uint64_t kfdg_phystokv(uint64_t handle, uint64_t pa);
+
 #ifdef __cplusplus
 }
 #endif

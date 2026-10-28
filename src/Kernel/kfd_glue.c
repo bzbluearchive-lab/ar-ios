@@ -2,7 +2,8 @@
 //
 // 位置：src/Kernel/kfd_glue.c
 // 作用：把 libkfd 的 4 个公开 API（kopen / kread / kwrite / kclose）与 kern_versions[]
-//       收在这一个文件里，向外只暴露 kfd_glue.h 里那 10 个纯 C 函数。
+//       收在这一个文件里，向外只暴露 kfd_glue.h 里那 11 个纯 C 函数
+//       （10 个原有 + phystokv 门面 kfdg_phystokv）。
 //
 // 为什么这个文件必须是 .c（不能是 .mm/.cpp）：
 //   vendor/kfd161 是 C 源码。perf.h:47/62/63/64 有
@@ -371,4 +372,91 @@ uint64_t kfdg_read_u64(uint64_t handle, uint64_t kaddr)
     }
 
     return (uint64_t)value;
+}
+
+/*
+ * ============================================================================
+ * 物理地址 → 内核虚拟地址
+ * ============================================================================
+ * 逐行移植 vendor/kfd161/libkfd/perf.h:220-238 的 phystokv()：
+ *
+ *   :222  const u64 PTOV_TABLE_SIZE = 8;                 → 本文件 kfdg_phystokv 里的 PTOV_TABLE_SIZE
+ *   :223  const u64 gVirtBase = kfd->perf.gVirtBase;     → 同名局部量
+ *   :224  const u64 gPhysBase = kfd->perf.gPhysBase;     → 同名局部量
+ *   :225  const u64 gPhysSize = kfd->perf.gPhysSize;     → 同名局部量
+ *   :228  ptov_table = &kfd->perf.ptov_table[0];         → 同名局部指针
+ *   :230  for (i = 0; (i < PTOV_TABLE_SIZE) && (ptov_table[i].len != 0); i++)
+ *   :231-233  if ((pa >= ptov_table[i].pa) && (pa < (ptov_table[i].pa + ptov_table[i].len)))
+ *                 return pa - ptov_table[i].pa + ptov_table[i].va;
+ *   :236  assert(!((pa < gPhysBase) || ((pa - gPhysBase) >= gPhysSize)));
+ *   :237  return pa - gPhysBase + gVirtBase;
+ *
+ * 改动只有一处：:236 那条 assert 换成"越界就打印并返回 0"。
+ *   理由与本文件其它函数一致 —— kfd161 里 assert 展开成 abort()（common.h:113-136），
+ *   真机上等于进程当场消失且日志可能丢在块缓冲里；phystokv 的入参来自我们自己算出来的
+ *   页表项，越界是"我们的推导错了"，必须是可恢复的返回值而不是 abort。
+ *
+ * 另外加了一条前置检查（不属于原函数）：perf 还没被 perf_run 填过时
+ * （gVirtBase / gPhysSize 都是 0）直接返回 0，避免拿着 0 做减法得出一个"看起来像地址"的垃圾值。
+ */
+uint64_t kfdg_phystokv(uint64_t handle, uint64_t pa)
+{
+    /* perf.h:222 */
+    const u64 PTOV_TABLE_SIZE = 8;
+
+    if (handle == 0) {
+        printf("[kfdg] phystokv 失败：句柄为 0\n");
+        return 0;
+    }
+
+    {
+        const struct kfd* kfd = (const struct kfd*)(usize)handle;
+
+        /* perf.h:223-225 */
+        const u64 gVirtBase = kfd->perf.gVirtBase;
+        const u64 gPhysBase = kfd->perf.gPhysBase;
+        const u64 gPhysSize = kfd->perf.gPhysSize;
+
+        /* perf.h:228（原版用 auto，本仓库 vendor/kfd161/libkfd/perf.h:228 已改成显式类型） */
+        const struct ptov_table_entry* ptov_table = &kfd->perf.ptov_table[0];
+
+        u64 i;
+
+        /*
+         * 前置检查：这四个值全部由 perf_run 写（perf.h:142-155：
+         * ptov_table 在 :143、gVirtBase 在 :146、gPhysBase 在 :150、gPhysSize 在 :154）。
+         * 一个都没填 = kopen 没走完 perf 那一段，此时下面两条分支都只能算出垃圾。
+         */
+        if ((gVirtBase == 0) || (gPhysSize == 0)) {
+            printf("[kfdg] phystokv 失败：perf 还没填好（gVirtBase=0x%llx gPhysSize=0x%llx）。"
+                   "这几个值和 ptov_table 都是 perf_run 里才写的（perf.h:142-155）\n",
+                   (unsigned long long)gVirtBase,
+                   (unsigned long long)gPhysSize);
+            return 0;
+        }
+
+        /* perf.h:230-234：ptov_table 优先（表里每条覆盖 [pa, pa+len) 区间） */
+        for (i = 0; (i < PTOV_TABLE_SIZE) && (ptov_table[i].len != 0); i++) {
+            if ((pa >= ptov_table[i].pa) && (pa < (ptov_table[i].pa + ptov_table[i].len))) {
+                return (uint64_t)(pa - ptov_table[i].pa + ptov_table[i].va);
+            }
+        }
+
+        /* perf.h:236 的 assert 换成下面这段：越界就是我们的页表项算错了，返回 0 让调用方停手 */
+        if ((pa < gPhysBase) || ((pa - gPhysBase) >= gPhysSize)) {
+            printf("[kfdg] phystokv 失败：pa=0x%llx 既不在 ptov_table[0..%llu) 里，也越界 "
+                   "(gPhysBase=0x%llx gPhysSize=0x%llx → 合法区间 [0x%llx, 0x%llx))；"
+                   "原版 perf.h:236 在这里是 assert，本实现改成返回 0\n",
+                   (unsigned long long)pa,
+                   (unsigned long long)PTOV_TABLE_SIZE,
+                   (unsigned long long)gPhysBase,
+                   (unsigned long long)gPhysSize,
+                   (unsigned long long)gPhysBase,
+                   (unsigned long long)(gPhysBase + gPhysSize));
+            return 0;
+        }
+
+        /* perf.h:237 */
+        return (uint64_t)(pa - gPhysBase + gVirtBase);
+    }
 }

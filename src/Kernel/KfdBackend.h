@@ -5,7 +5,7 @@
 //       绝不把进程带走、绝不 abort。对外的类/函数名与日志前缀（[kfd]）保持不变，
 //       调用方（host/main.mm: kfdb::selftest(method)）不需要改一行。
 //
-// 本文件只看得见 src/Kernel/kfd_glue.h 里那 10 个 extern "C" 函数；
+// 本文件只看得见 src/Kernel/kfd_glue.h 里那 11 个 extern "C" 函数；
 // 所有 vendor 类型（struct kfd / struct dynamic_info / kern_versions[]）都在
 // src/Kernel/kfd_glue.c 里被吃掉，这里一个都不出现。
 //

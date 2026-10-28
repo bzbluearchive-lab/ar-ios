@@ -24,6 +24,7 @@
 #include "../src/Inject/TaskPorts.h"
 #include "../src/Inject/CodeCave.h"
 #include "../src/Kernel/KfdBackend.h"
+#include "../src/Kernel/KrwProc.h"
 #include "../src/Game/Ue4Remote.h"
 #include "../src/Kernel/KernelBackend.h"
 #include "../src/Kernel/BuildTable.h"
@@ -621,6 +622,45 @@ static void ARKfdSelfTest(int method) {
     fflush(stdout);
 }
 
+
+// ---------------------------------------------------------------------------
+// 跨进程读自检（页表遍历）
+//
+// 先只读**我们自己的内存**：拿自己的已知 canary 值，通过
+//   kernel_proc → p_list → 本进程 proc → proc_ro → task → map → pmap → 页表
+// 读回来比对。这一步不碰游戏，能一次性验证：
+//   ① proc→proc_ro(0x18)→pr_task(0x8) 的偏移对不对
+//   ② 16KB 粒度页表遍历 + PTE 解析对不对
+//   ③ kread 在真机上对"用户页的影子地址"是否可读
+// 这三条都过，才谈得上读游戏内存。
+// ---------------------------------------------------------------------------
+static void ARKrwSelfTest(void) {
+    printf("\n=== 跨进程读自检（页表遍历，目标=本进程）===\n");
+    fflush(stdout);
+
+    kfdb::Client c;
+    if (!c.init(0)) {                 // 0 = physpuppet（真机已验证可用）
+        printf("[krw-test] kfd 初始化失败，先看上一节 [kfd] 日志\n");
+        return;
+    }
+    printf("[krw-test] kfd 就绪 handle=0x%llx\n", (unsigned long long)c.handle);
+
+    krwproc::Ctx kc;
+    if (!krwproc::init(&kc, c.handle)) {
+        printf("[krw-test] krwproc::init 失败\n");
+        c.shutdown();
+        return;
+    }
+    printf("[krw-test] kernel_proc=0x%llx\n", (unsigned long long)kc.kernel_proc);
+
+    bool ok = krwproc::selftest_self(kc);
+    printf("[krw-test] 结论: %s\n", ok ? "页表遍历可用（可继续读游戏内存）"
+                                      : "页表自检失败（看上面 [krw] 哪一步断）");
+    c.shutdown();
+    printf("=== 自检结束 ===\n");
+    fflush(stdout);
+}
+
 static void ARDumpBreadcrumbs(void);
 
 
@@ -812,6 +852,12 @@ static void ARInjectSpringBoard(const char* kw) {
     [kfd2 addTarget:self action:@selector(onKfdLanda) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:kfd2];
 
+    UIButton* krwBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    krwBtn.frame = CGRectMake(pad, 690, w - pad*2, 38);
+    [krwBtn setTitle:@"跨进程读自检（页表遍历，读自己）" forState:UIControlStateNormal];
+    [krwBtn addTarget:self action:@selector(onKrwTest) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:krwBtn];
+
 
     // 只扫描不注入：安全的诊断步骤，绝不碰任何目标进程的内存
     UIButton* scan = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -829,7 +875,7 @@ static void ARInjectSpringBoard(const char* kw) {
     self.keyword.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
     [self.view addSubview:self.keyword];
 
-    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 690, w - pad*2, self.view.bounds.size.height - 710)];
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, 736, w - pad*2, self.view.bounds.size.height - 756)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     [self.view addSubview:self.logView];
@@ -999,6 +1045,20 @@ static void ARScanOnly(const char* kw) {
                                                      encoding:NSUTF8StringEncoding error:nil];
             self.logView.text = log ?: @"(没有日志)";
             self.status.text = @"扫描完成，未注入";
+        });
+    });
+}
+
+- (void)onKrwTest {
+    self.status.text = @"页表自检中…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ARRedirectToLog();
+        ARKrwSelfTest();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* log = [NSString stringWithContentsOfFile:daemonLogPath()
+                                                     encoding:NSUTF8StringEncoding error:nil];
+            self.logView.text = log ?: @"(没有日志)";
+            self.status.text = @"页表自检结束";
         });
     });
 }
