@@ -247,6 +247,9 @@ inline bool looks_like_kva(uint64_t v) { return v >= kKvaFloor; }
 struct Ctx {
     uint64_t kfd;          // kfdg_open() 的句柄；0 = 不可用
     uint64_t kernel_proc;  // pid 0 那条 struct proc 的内核地址（kfdg_kernel_proc）
+    // ★ 关键：kernel_proc 是 kernel_task 的 proc，**不在 allproc 链表上**（实测 le_next=0），
+    //   所以遍历链表必须从 current_proc 出发（它一定在链上）。
+    uint64_t current_proc; // 本进程 struct proc 的内核地址（kfdg_current_proc）
 };
 
 // ===========================================================================
@@ -353,8 +356,21 @@ inline bool init(Ctx* c, uint64_t kfdHandle)
         return false;
     }
 
+    uint64_t cp = kfdg_current_proc(kfdHandle);
+    if (cp == 0) {
+        printf("[krw] init 失败：kfdg_current_proc 返回 0（拿不到本进程 proc，无法遍历 p_list）\n");
+        return false;
+    }
+    if (!looks_like_kva(cp) || ((cp & 0x7ull) != 0)) {
+        printf("[krw] init 失败：current_proc=0x%llx 不像内核 VA 或不对齐\n",
+               (unsigned long long)cp);
+        return false;
+    }
+    printf("[krw] current_proc = 0x%llx（p_list 遍历起点）\n", (unsigned long long)cp);
+
     c->kfd = kfdHandle;
     c->kernel_proc = kp;
+    c->current_proc = cp;
 
     // 第二道独立证据：kernel_proc 的 p_pid 必须是 0（kernel task 的 proc）。
     // 判据与 KfdBackend.h 的 selftest 第 4 步相同；顺带证明 p_pid 偏移 0x60 与 slide 是对的。
@@ -397,111 +413,101 @@ inline bool init(Ctx* c, uint64_t kfdHandle)
 inline constexpr uint64_t kMaxProcScan = 4096;
 inline constexpr uint64_t kCycleRing   = 32;
 
-inline uint64_t find_proc(const Ctx& c, int pid)
+// 单向扫描：从 start 出发，forward=true 走 le_next、false 走 le_prev。
+// LIST_ENTRY 语义：le_prev 存的是"前一个元素的 le_next 字段地址"；
+// 因为 p_list 是 struct proc 的第一个成员（偏移 0），所以上一节点地址 == le_prev 的值。
+inline uint64_t scan_dir(const Ctx& c, uint64_t start, int pid, bool forward, const char* tag)
 {
-    uint64_t ring[kCycleRing];
-    uint64_t ring_pos = 0;
-    uint64_t cur = 0;
-    uint64_t step = 0;
+    uint64_t cur = start;
+    const uint64_t off = forward ? kProcPListLeNext : kProcPListLePrev;
+    const char* fname = forward ? "le_next" : "le_prev";
 
-    if (c.kfd == 0 || c.kernel_proc == 0) {
-        printf("[krw] find_proc 失败：Ctx 没 init（kfd=0x%llx kernel_proc=0x%llx）\n",
-               (unsigned long long)c.kfd,
-               (unsigned long long)c.kernel_proc);
-        return 0;
-    }
-
-    {
-        uint64_t i = 0;
-        for (i = 0; i < kCycleRing; i++) {
-            ring[i] = 0;
-        }
-    }
-
-    cur = c.kernel_proc;
-
-    for (step = 0; step < kMaxProcScan; step++) {
+    for (uint64_t step = 0; step < kMaxProcScan; step++) {
         uint64_t w = 0;
-        uint64_t raw_next = 0;
-        uint64_t next = 0;
-        int32_t node_pid = 0;
-        uint64_t i = 0;
-
-        // 短环检测：cur 在最近 kCycleRing 个节点里出现过
-        for (i = 0; i < kCycleRing; i++) {
-            if (ring[i] == cur) {
-                printf("[krw] find_proc 失败：p_list 在 0x%llx 处形成短环（第 %llu 步重访，"
-                       "最近 %llu 个节点内重复），pid=%d 没找到\n",
-                       (unsigned long long)cur,
-                       (unsigned long long)step,
-                       (unsigned long long)kCycleRing,
-                       pid);
-                return 0;
-            }
-        }
-        ring[ring_pos] = cur;
-        ring_pos = (ring_pos + 1ull) % kCycleRing;
-
-        // 1) p_pid（int32，落在低 32 位）
         if (!kread64(c, cur + kProcPid, &w)) {
-            printf("[krw] find_proc 失败：读 p_pid 失败，第 %llu 个节点 proc=0x%llx（kaddr=0x%llx）\n",
-                   (unsigned long long)step,
-                   (unsigned long long)cur,
+            printf("[krw] scan(%s) 停止：读 p_pid 失败，第 %llu 个节点 proc=0x%llx（kaddr=0x%llx）\n",
+                   tag, (unsigned long long)step, (unsigned long long)cur,
                    (unsigned long long)(cur + kProcPid));
             return 0;
         }
-        node_pid = (int32_t)(uint32_t)(w & 0xffffffffull);
-        if (node_pid == pid) {
-            printf("[krw] find_proc 命中：pid=%d proc=0x%llx（第 %llu 个节点）\n",
-                   pid,
-                   (unsigned long long)cur,
-                   (unsigned long long)(step + 1ull));
+        int32_t np = (int32_t)(uint32_t)(w & 0xffffffffull);
+        if (np == pid) {
+            printf("[krw] scan(%s) 命中：pid=%d proc=0x%llx（第 %llu 个节点）\n",
+                   tag, pid, (unsigned long long)cur, (unsigned long long)(step + 1ull));
             return cur;
         }
 
-        // 2) 下一个节点 = p_list.le_next
-        if (!kread64(c, cur + kProcPListLeNext, &raw_next)) {
-            printf("[krw] find_proc 失败：读 le_next 失败，第 %llu 个节点 proc=0x%llx（kaddr=0x%llx）\n",
-                   (unsigned long long)step,
-                   (unsigned long long)cur,
-                   (unsigned long long)(cur + kProcPListLeNext));
+        uint64_t raw = 0;
+        if (!kread64(c, cur + off, &raw)) {
+            printf("[krw] scan(%s) 停止：读 %s 失败，第 %llu 个节点 proc=0x%llx\n",
+                   tag, fname, (unsigned long long)step, (unsigned long long)cur);
             return 0;
         }
-        if (raw_next == 0) {
-            printf("[krw] find_proc 失败：第 %llu 个节点 proc=0x%llx 的 le_next=0（链表断裂）\n",
-                   (unsigned long long)step,
-                   (unsigned long long)cur);
+        if (raw == 0) {
+            printf("[krw] scan(%s) 到链头/链尾：第 %llu 个节点 proc=0x%llx 的 %s=0\n",
+                   tag, (unsigned long long)step, (unsigned long long)cur, fname);
             return 0;
         }
-        next = unsign_kaddr(raw_next);
-        if ((next & 0x7ull) != 0) {
-            printf("[krw] find_proc 失败：第 %llu 个节点 proc=0x%llx 的 le_next raw=0x%llx "
-                   "归一后=0x%llx 不对齐（偏移或 PAC 掩码不对）\n",
-                   (unsigned long long)step,
-                   (unsigned long long)cur,
-                   (unsigned long long)raw_next,
-                   (unsigned long long)next);
+        uint64_t nxt = unsign_kaddr(raw);
+        if ((nxt & 0x7ull) != 0) {
+            printf("[krw] scan(%s) 停止：%s raw=0x%llx 归一后=0x%llx 不对齐（偏移或 PAC 掩码不对）\n",
+                   tag, fname, (unsigned long long)raw, (unsigned long long)nxt);
             return 0;
         }
-        if (next == cur) {
-            printf("[krw] find_proc 失败：proc=0x%llx 的 le_next 自指\n", (unsigned long long)cur);
+        if (nxt == cur) {
+            printf("[krw] scan(%s) 停止：proc=0x%llx 的 %s 自指\n",
+                   tag, (unsigned long long)cur, fname);
             return 0;
         }
-        if (next == c.kernel_proc) {
-            printf("[krw] find_proc 失败：走满一圈回到起点 0x%llx（共 %llu 个节点），"
-                   "pid=%d 不在 p_list 上\n",
-                   (unsigned long long)c.kernel_proc,
-                   (unsigned long long)(step + 1ull),
-                   pid);
+        if (nxt == start) {
+            printf("[krw] scan(%s) 走满一圈回到起点 0x%llx（共 %llu 个节点）\n",
+                   tag, (unsigned long long)start, (unsigned long long)(step + 1ull));
             return 0;
         }
-        cur = next;
+        cur = nxt;
     }
 
-    printf("[krw] find_proc 失败：pid=%d 在 %llu 步硬上限内没找到（p_list 可能已经坏了）\n",
-           pid,
-           (unsigned long long)kMaxProcScan);
+    printf("[krw] scan(%s)：%llu 步硬上限内没找到 pid=%d\n",
+           tag, (unsigned long long)kMaxProcScan, pid);
     return 0;
+}
+
+inline uint64_t find_proc(const Ctx& c, int pid)
+{
+    if (c.kfd == 0) {
+        printf("[krw] find_proc 失败：Ctx 没 init（kfd=0）\n");
+        return 0;
+    }
+
+    // 起点必须选在 allproc 链表里的节点：优先 current_proc。
+    // （kernel_proc 是 kernel_task 的 proc，实测它的 le_next=0，不在链上。）
+    uint64_t start = c.current_proc ? c.current_proc : c.kernel_proc;
+    if (start == 0) {
+        printf("[krw] find_proc 失败：current_proc 与 kernel_proc 都是 0\n");
+        return 0;
+    }
+    printf("[krw] find_proc 起点=0x%llx（%s），目标 pid=%d\n",
+           (unsigned long long)start,
+           c.current_proc ? "current_proc" : "kernel_proc（回退）",
+           pid);
+
+    // 打印起点节点的自检信息：p_pid / le_next / le_prev，便于判断起点是否真的在链上
+    {
+        uint64_t v_pid = 0, v_next = 0, v_prev = 0;
+        if (kread64(c, start + kProcPid, &v_pid) &&
+            kread64(c, start + kProcPListLeNext, &v_next) &&
+            kread64(c, start + kProcPListLePrev, &v_prev)) {
+            printf("[krw] 起点自检：p_pid=%d le_next=0x%llx le_prev=0x%llx\n",
+                   (int32_t)(uint32_t)(v_pid & 0xffffffffull),
+                   (unsigned long long)v_next, (unsigned long long)v_prev);
+        }
+    }
+
+    uint64_t r = scan_dir(c, start, pid, true, "forward");
+    if (r != 0) return r;
+
+    printf("[krw] find_proc：正向没命中，改从起点反向扫（le_prev）\n");
+    return scan_dir(c, start, pid, false, "backward");
 }
 
 // ===========================================================================
