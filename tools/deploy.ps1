@@ -122,7 +122,7 @@ try {
 
     $recent = Api 'Get' "$base/actions/runs?per_page=30"
     $stale = $recent.workflow_runs | Where-Object {
-        $_.name -eq 'build' -and ($_.status -eq 'queued' -or $_.status -eq 'in_progress')
+        $_.name -eq 'build-ar' -and ($_.status -eq 'queued' -or $_.status -eq 'in_progress')
     }
     foreach ($r in $stale) {
         try { $null = Api 'Post' "$base/actions/runs/$($r.id)/cancel"; "cancelled stale run #$($r.run_number)" }
@@ -138,7 +138,7 @@ try {
     $iterations = [int](($TimeoutMinutes * 60) / 15)
     for ($i = 1; $i -le $iterations; $i++) {
         $runs = Api 'Get' "$base/actions/runs?per_page=10"
-        $run = $runs.workflow_runs | Where-Object { $_.name -eq 'build' -and $_.head_sha -eq $nc.sha } | Select-Object -First 1
+        $run = $runs.workflow_runs | Where-Object { $_.name -eq 'build-ar' -and $_.head_sha -eq $nc.sha } | Select-Object -First 1
         if ($run) {
             "{0,5}s: {1}/{2}" -f ($i*15), $run.status, $run.conclusion
             if ($run.status -eq 'completed') { break }

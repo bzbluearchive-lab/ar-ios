@@ -1,5 +1,4 @@
-name: build
-
+name: build-ar
 # macOS runner 构建，本地零安装。
 # 产物：build/*.ipa —— M(minimal) / B(full) / T(theos staged)，各自独立 bundle id，
 #       用于二分定位「安装成功但启动即退」的原因。
